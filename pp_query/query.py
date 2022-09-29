@@ -141,7 +141,7 @@ class CensoredPP:
         denom_times, denom_marks = cond_seqs["denom_cond_times"][i], cond_seqs["denom_cond_marks"][i]
 
         # intensity = np.array([self.base_process.intensity(t, numer_times, numer_marks)*mark_mask for t in ts])
-        intensity = self.base_process.intensity(ts, numer_times, numer_marks)*mark_mask[np.newaxis, :]
+        intensity = self.base_process.intensity(ts, numer_times, numer_marks)*mark_mask.unsqueeze(0) #[np.newaxis, :]
         numer_comp = self.base_process.compensator_grid(a, b, numer_times, numer_marks, num_samples-1) * mark_mask.unsqueeze(0) #[np.newaxis, :]
         denom_comp = self.base_process.compensator_grid(a, b, denom_times, denom_marks, num_samples-1) * mark_mask.unsqueeze(0) #[np.newaxis, :]
 
