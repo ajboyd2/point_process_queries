@@ -2,6 +2,7 @@ from bdb import effective
 import torch
 import torch.nn.functional as F
 
+from tqdm import tqdm
 from abc import ABC, abstractmethod
 
 
@@ -35,7 +36,7 @@ class CensoredPP:
   ):
     n = self.num_sampled_sequences
     cond_times, cond_marks = [], []
-    mark_mask = np.ones((self.marks,)).astype(float)
+    mark_mask = torch.ones((self.marks,), dtype=torch.float32)
     mark_mask[self.observed_marks] = 0.0  # Only sample the censored marks (to marginalize them out)
     for _ in range(n):
       times, marks = self.base_process.sample(
@@ -67,38 +68,38 @@ class CensoredPP:
   def intensity(
       self, 
       t, 
-      sampled_times, 
-      sampled_marks, 
+      conditional_times, 
+      conditional_marks, 
       cond_seqs=None,
       censoring_start_time=0.0,
   ):
     if not isinstance(t, (int, float)):
-      return np.array([self.intensity(_t, sampled_times, sampled_marks, cond_seqs, censoring_start_time) for _t in t])
+      return torch.FloatTensor([self.intensity(_t, conditional_times, conditional_marks, cond_seqs, censoring_start_time) for _t in t])
 
-    if sampled_times is None:
-      sampled_times, sampled_marks = np.array([]).astype(float), np.array([]).astype(int)
+    if conditional_times is None:
+      conditional_times, conditional_marks = torch.FloatTensor([]), torch.IntTensor([])
 
     if t <= censoring_start_time:
-      return self.base_process.intensity(t, sampled_times, sampled_marks)
+      return self.base_process.intensity(t, conditional_times, conditional_marks)
 
     if cond_seqs is None:  # sample conditional sequences for expected values
       cond_seqs = self.gen_cond_seqs(
           right_window=t, 
           left_window=censoring_start_time, 
-          fixed_times=sampled_times, 
-          fixed_marks=sampled_marks,
+          fixed_times=conditional_times, 
+          fixed_marks=conditional_marks,
       )  # sampled_times and sampled_marks will be included in the resulting sequences
 
     numer, denom = 0.0, 0.0
     pp = self.base_process
-    num_seqs = self.num_sampled_sequences // 2
+    num_seqs = self.num_sampled_sequences // (1 if self.use_same_seqs_for_ratio else 2)
     obs, cen = self.observed_marks, self.censored_marks
     for i in range(num_seqs):
       numer_times, numer_marks = cond_seqs["numer_cond_times"][i], cond_seqs["numer_cond_marks"][i]
-      n = pp.intensity(t, numer_times, numer_marks) * np.exp(-pp.compensator(censoring_start_time, t, numer_times, numer_marks)[obs].sum())
+      n = pp.intensity(t, numer_times, numer_marks) * torch.exp(-pp.compensator(censoring_start_time, t, numer_times, numer_marks)[obs].sum())
       
       denom_times, denom_marks = cond_seqs["denom_cond_times"][i], cond_seqs["denom_cond_marks"][i]
-      d = np.exp(-pp.compensator(censoring_start_time, t, denom_times, denom_marks)[obs].sum())
+      d = torch.exp(-pp.compensator(censoring_start_time, t, denom_times, denom_marks)[obs].sum())
 
       #print(numer, denom, n, d, numer_times, numer_marks, denom_times, denom_marks)
       #print()
@@ -124,51 +125,43 @@ class CensoredPP:
       cond_seqs = self.gen_cond_seqs(
           right_window=b, 
           left_window=censoring_start_time, 
-          fixed_times=sampled_times, 
-          fixed_marks=sampled_marks,
+          fixed_times=conditional_times, 
+          fixed_marks=conditional_marks,
       )  # sampled_times and sampled_marks will be included in the resulting sequences
 
-    if isinstance(self.base_process, Hawkes):
-      print("Alt Comp")
-      numer, denom = [], []
+    numer, denom = [], []
 
-      ts = np.linspace(a, b, num_samples)
-      num_seqs = self.num_sampled_sequences // 2
-      mark_mask = np.ones((self.marks,)).astype(float)
-      if len(self.censored_marks) > 0:
+    ts = torch.linspace(a, b, num_samples)
+    num_seqs = self.num_sampled_sequences // 2
+    mark_mask = torch.ones((self.marks,), dtype=torch.float32)
+    if len(self.censored_marks) > 0:
         mark_mask[self.censored_marks] = 0.0
-      for i in tqdm(range(num_seqs)):
+    for i in tqdm(range(num_seqs)):
         numer_times, numer_marks = cond_seqs["numer_cond_times"][i], cond_seqs["numer_cond_marks"][i]
         denom_times, denom_marks = cond_seqs["denom_cond_times"][i], cond_seqs["denom_cond_marks"][i]
 
         # intensity = np.array([self.base_process.intensity(t, numer_times, numer_marks)*mark_mask for t in ts])
         intensity = self.base_process.intensity(ts, numer_times, numer_marks)*mark_mask[np.newaxis, :]
-        if estimate_inner_ints:
-          numer_comp = super(Hawkes, self.base_process).compensator_grid(a, b, numer_times, numer_marks, num_samples-1) * mark_mask[np.newaxis, :]
-          denom_comp = super(Hawkes, self.base_process).compensator_grid(a, b, denom_times, denom_marks, num_samples-1) * mark_mask[np.newaxis, :]
-        else:
-          numer_comp = self.base_process.compensator_grid(a, b, numer_times, numer_marks, num_samples-1) * mark_mask[np.newaxis, :]
-          denom_comp = self.base_process.compensator_grid(a, b, denom_times, denom_marks, num_samples-1) * mark_mask[np.newaxis, :]
+        numer_comp = self.base_process.compensator_grid(a, b, numer_times, numer_marks, num_samples-1) * mark_mask.unsqueeze(0) #[np.newaxis, :]
+        denom_comp = self.base_process.compensator_grid(a, b, denom_times, denom_marks, num_samples-1) * mark_mask.unsqueeze(0) #[np.newaxis, :]
 
-        if censoring_start_time < a:
-          numer_comp += self.base_process.compensator(censoring_start_time, a, numer_times, numer_marks) * mark_mask
-          denom_comp += self.base_process.compensator(censoring_start_time, a, denom_times, denom_marks) * mark_mask
+    if censoring_start_time < a:
+        numer_comp += self.base_process.compensator(censoring_start_time, a, numer_times, numer_marks) * mark_mask
+        denom_comp += self.base_process.compensator(censoring_start_time, a, denom_times, denom_marks) * mark_mask
 
-        numer.append(intensity * np.exp(-numer_comp.sum(axis=1, keepdims=True)) / num_seqs)
-        denom.append(np.exp(-denom_comp.sum(axis=1, keepdims=True)) / num_seqs)
-
-      print(len(numer), numer[0].shape)
-      numer, denom = sum(numer), sum(denom)  # each are size (num_samples, marks)
-      censored_intensities = numer / denom
-      # Perform trapezoidal rule to approximate \int_a^b of censored_intensity(t) dt
-      censored_intensities[1:-1] *= 2
-      delta = (b-a)/(num_samples-1)
-      return delta * censored_intensities.sum(axis=0) / 2
-    else:
-      return super().compensator(a, b, sampled_times, sampled_marks, num_samples, cond_seqs=cond_seqs, censoring_start_time=censoring_start_time)
+    numer.append(intensity * torch.exp(-torch.sum(numer_comp, dim=1, keepdim=True)) / num_seqs)
+    denom.append(torch.exp(-torch.sum(denom_comp, dim=1, keepdim=True)) / num_seqs)
+    
+    print(len(numer), numer[0].shape)
+    numer, denom = sum(numer), sum(denom)  # each are size (num_samples, marks)
+    censored_intensities = numer / denom
+    # Perform trapezoidal rule to approximate \int_a^b of censored_intensity(t) dt
+    censored_intensities[1:-1] *= 2
+    delta = (b-a)/(num_samples-1)
+    return delta * censored_intensities.sum(axis=0) / 2
 
   def sample(self, right_window=None, left_window=0.0, length_limit=None, sampled_times=None, sampled_marks=None, mark_mask=1.0): 
-    mark_mask = np.ones((self.marks,)).astype(float) * mark_mask
+    mark_mask = torch.ones((self.marks,), dtype=torch.float32) * mark_mask
     mark_mask[self.censored_marks] = 0.0  # don't allow samples of censored marks
     return super().sample(
         right_window=right_window, 
