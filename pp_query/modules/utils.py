@@ -81,19 +81,23 @@ def find_closest(sample_times, true_times):
         dict -- Contains the closest values and corresponding indices from true_times.
     """
     # Pad true events with zeros (if a value in t is smaller than all of true_times, then we have it compared to time=0)
-    padded_true_times =  torch.cat((true_times[..., [0]]*0, true_times), dim=-1)  
+    if true_times.shape[-1] == 0:
+        padded_true_times = torch.zeros(*true_times.shape[:-1], 1, device=true_times.device, dtype=torch.float32)
+    else:
+        padded_true_times = torch.cat((true_times[..., [0]]*0, true_times), dim=-1)
 
     # Format true_times to have all values compared against all values of t
     size = padded_true_times.shape
     expanded_true_times = padded_true_times.unsqueeze(-1).expand(*size, sample_times.shape[-1])  
     expanded_true_times = expanded_true_times.permute(*list(range(len(size)-1)), -1, -2)
 
-    # Find out which true event times happened after which times in t, then mask them out
-    mask = expanded_true_times < sample_times.unsqueeze(-1)
+    # Find out which true event times happened after which times in t, then mask them out 
+    mask = (expanded_true_times < sample_times.unsqueeze(-1))
     adjusted_expanded_true_times = torch.where(mask, expanded_true_times, -expanded_true_times*float('inf'))
 
     # Find the largest, unmasked values. These are the closest true event times that happened prior to the times in t.
     closest_values, closest_indices = adjusted_expanded_true_times.max(dim=-1)
+    closest_values = torch.nan_to_num(closest_values, nan=0.0)  # cover edge case when sample_times == 0.0
 
     return {
         "closest_values": closest_values,

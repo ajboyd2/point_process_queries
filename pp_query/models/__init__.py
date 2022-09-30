@@ -71,4 +71,5 @@ def get_model(
 
     return PPModel(
         decoder=decoder,
+        num_channels=num_channels,
     )

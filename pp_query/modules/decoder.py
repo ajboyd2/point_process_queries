@@ -148,7 +148,7 @@ class PPDecoder(nn.Module):
 
         return torch.cat((init_hidden_state[-1, :, :].unsqueeze(1), hidden_states), dim=1)
 
-    def get_intensity(self, state_values, state_times, timestamps, latent_state=None):
+    def get_intensity(self, state_values, state_times, timestamps, mark_mask=1.0):
         """Gennerate intensity values for a point process.
         
         Arguments:
@@ -172,7 +172,7 @@ class PPDecoder(nn.Module):
 
         components = [time_embedding, selected_hidden_states]
 
-        return self.intensity_net(*components)
+        return self.intensity_net(*components, mark_mask=mark_mask)
 
 class HawkesDecoder(nn.Module):
     """Decoder module that transforms a set of marks, timestamps, and latent vector into intensity values for different channels."""
@@ -271,7 +271,7 @@ class HawkesDecoder(nn.Module):
         hidden_states = torch.stack(hidden_states, dim=1)
         return hidden_states
 
-    def get_intensity(self, state_values, state_times, timestamps):
+    def get_intensity(self, state_values, state_times, timestamps, mark_mask=1.0):
         """Gennerate intensity values for a point process.
         
         Arguments:
@@ -297,6 +297,9 @@ class HawkesDecoder(nn.Module):
         _, h_t = self.decay(c, c_bar, o_t, delta_t, time_embedding)
 
         intensity_values = F.softplus(self.hidden_to_intensity_logits(h_t))
+        if isinstance(mark_mask, torch.FloatTensor):
+            intensity_values *= mark_mask.view(*((1,)*(len(intensity_values.shape)-1)), -1)
+
         all_log_mark_intensities = torch.log(intensity_values + 1e-12)
         total_intensity = intensity_values.sum(dim=-1)
 

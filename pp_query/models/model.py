@@ -52,6 +52,8 @@ class PPModel(nn.Module):
     def __init__(
         self, 
         decoder, 
+        num_channels,
+        dominating_rate=100.,
     ):
         """Constructor for general PPModel class.
         
@@ -66,6 +68,8 @@ class PPModel(nn.Module):
         super().__init__()
 
         self.decoder = decoder
+        self.num_channels = num_channels
+        self.dominating_rate = dominating_rate
 
     def get_states(self, marks, timestamps):
         """Get the hidden states that can be used to extract intensity values from."""
@@ -80,14 +84,18 @@ class PPModel(nn.Module):
             "state_times": timestamps,
         }
 
-    def get_intensity(self, state_values, state_times, timestamps, marks=None):
-        """Given a set of hidden states, timestamps, and latent_state get a tensor representing intensity values at timestamps.
+    def get_intensity(self, state_values, state_times, timestamps, marks=None, state_marks=None, mark_mask=1.0):
+        """Given a set of hidden states, timestamps, and latent_state get a tensor representing intensity valu[es at timestamps.
         Specify marks to get intensity values for specific channels."""
+
+        if (state_values is None) and (state_marks is not None):
+            state_values = self.get_states(state_marks, state_times)["state_values"]
 
         intensity_dict = self.decoder.get_intensity(
             state_values=state_values,
             state_times=state_times,
             timestamps=timestamps,
+            mark_mask=mark_mask,
         )
 
         if marks is not None:
@@ -116,6 +124,9 @@ class PPModel(nn.Module):
             dict -- Dictionary containing the produced latent vector, intermediate hidden states, and intensity values for target sequence and sample points.
         """
         return_dict = {}
+        if marks is None:
+            marks = torch.LongTensor([[]], device=next(self.parameters()).device)
+            timestamps = torch.FloatTensor([[]], device=next(self.parameters()).device)
 
         # Decoding phase
         intensity_state_dict = self.get_states(
@@ -197,23 +208,30 @@ class PPModel(nn.Module):
             }
 
         
-    def sample_points(self, marks, timestamps, dominating_rate, T, left_window, top_k=0, top_p=0.0):
+    def sample_points(self, marks, timestamps, dominating_rate=None, T=float('inf'), left_window=0.0, length_limit=float('inf'), mark_mask=1.0, top_k=0, top_p=0.0):
+        assert((T < float('inf')) or (length_limit < float('inf')))
+        if dominating_rate is None:
+            dominating_rate = self.dominating_rate
+        if marks is None:
+            marks = torch.LongTensor([[]], device=next(self.parameters()).device)
+            timestamps = torch.FloatTensor([[]], device=next(self.parameters()).device)
+
         state = self.forward(marks, timestamps)
-        state_values, state_times, latent_state = state["state_dict"]["state_values"], state["state_dict"]["state_times"], state["latent_state"]
+        state_values, state_times = state["state_dict"]["state_values"], state["state_dict"]["state_times"]
         
         dist = torch.distributions.Exponential(dominating_rate)
         last_time = left_window 
-        new_time = last_time + dist.sample(sample_shape=torch.Size((1,1))).to(torch.cuda.current_device())
+        new_time = last_time + dist.sample(sample_shape=torch.Size((1,1))).to(state_values.device)
         sampled_times = []
         sampled_marks = []
-        while new_time < T:
+        while (new_time < T) and (timestamps.shape[-1] < length_limit):
             sample_intensities = self.get_intensity(
                 state_values=state_values,
                 state_times=state_times,
                 timestamps=new_time,
-                latent_state=latent_state,
                 marks=None,
-            )
+                mark_mask=mark_mask,
+            ) 
 
             if torch.rand_like(new_time) <= (sample_intensities["total_intensity"] / (dominating_rate)):
                 if top_k > 0 or top_p > 0:
@@ -229,9 +247,9 @@ class PPModel(nn.Module):
                 sampled_marks.append(new_mark.squeeze().item())
 
                 state = self.forward(marks, timestamps)
-                state_values, state_times, latent_state = state["state_dict"]["state_values"], state["state_dict"]["state_times"], state["latent_state"]
+                state_values, state_times = state["state_dict"]["state_values"], state["state_dict"]["state_times"]
         
-            new_time = new_time + dist.sample(sample_shape=torch.Size((1,1))).to(torch.cuda.current_device())
+            new_time = new_time + dist.sample(sample_shape=torch.Size((1,1))).to(state_values.device)
 
         assumption_violation = False
         for _ in range(5):
@@ -240,7 +258,6 @@ class PPModel(nn.Module):
                 state_values=state_values,
                 state_times=state_times,
                 timestamps=eval_times,
-                latent_state=latent_state,
                 marks=None,
             )
             if (sample_intensities["total_intensity"] > dominating_rate).any().item():
@@ -253,7 +270,10 @@ class PPModel(nn.Module):
             print("Violation in sampling assumption occurred. Redoing sample.")
             return None # self.sample_points(ref_marks, ref_timestamps, ref_marks_bwd, ref_timestamps_bwd, tgt_marks, tgt_timestamps, context_lengths, dominating_rate * 2, T)
         else:
-            return sampled_times, sampled_marks
+            return (timestamps, marks)
+            #     torch.cat((timestamps, torch.FloatTensor([sampled_times])), dim=-1), 
+            #     torch.cat((marks, torch.LongTensor([sampled_marks])), dim=-1),
+            # )
 
     def get_param_groups(self):
         """Returns iterable of dictionaries specifying parameter groups.
@@ -282,3 +302,37 @@ class PPModel(nn.Module):
                 ])
 
         return weight_decay_params, no_weight_decay_params
+
+    def compensator(self, a, b, conditional_times, conditional_marks, num_int_pts=100):
+        assert(a < b)
+        state_dict = self.get_states(conditional_marks, conditional_times)
+        vals = 2*self.get_intensity(
+            state_values=state_dict["state_values"], 
+            state_times=state_dict["state_times"], 
+            timestamps=torch.linspace(a, b, num_int_pts).to(next(self.parameters()).device).expand(*conditional_times.shape[:-1], -1), 
+            marks=None,
+        )["all_log_mark_intensities"].exp()
+        vals[..., 0, :], vals[..., -1, :] = 0.5*vals[..., 0, :], 0.5*vals[..., -1, :]
+        delta = (b-a)/(num_int_pts-1)
+        return delta * vals.sum(dim=-2) / 2
+
+    def compensator_grid(self, a, b, conditional_times, conditional_marks, num_int_pts, *args, **kwargs):
+        if conditional_times is None:
+            conditional_times, conditional_marks = torch.FloatTensor([[]]), torch.LongTensor([[]])
+
+        state_dict = self.get_states(conditional_marks, conditional_times)
+        num_int_pts += 1  # increment as we use n+1 samples to generate n integral results
+        comps = torch.zeros((*conditional_times.shape[:-1], num_int_pts, self.num_channels), dtype=torch.float32)
+        ts = torch.linspace(a, b, num_int_pts)
+        intensities = self.get_intensity(
+            state_values=state_dict["state_values"],
+            state_times=state_dict["state_times"],
+            timestamps=ts, 
+            marks=None,
+        )['all_log_mark_intensities'].exp()
+        width = (b - a) / (num_int_pts - 1)
+        height = (intensities[..., :-1, :] + intensities[..., 1:, :]) / 2
+        comps[..., 1:, :] = height * width
+        comps = comps.cumsum(dim=-2)
+
+        return comps

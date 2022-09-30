@@ -153,10 +153,11 @@ def print_results(args, items, epoch_number, iteration, data_len, training=True)
     msg += "".join("{} {:.4E} | ".format(k, v) for k,v in items)
     print_log(msg)
 
-def set_random_seed(args):
+def set_random_seed(args=None, seed=None):
     """Set random seed for reproducibility."""
 
-    seed = args.seed
+    if (seed is None) and (args is not None):
+        seed = args.seed
 
     if seed is not None and seed > 0:
         random.seed(seed)
