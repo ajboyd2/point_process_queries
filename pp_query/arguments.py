@@ -1,5 +1,5 @@
 import argparse
-import json
+import torch
 
 from .utils import print_log
 
@@ -103,5 +103,10 @@ def get_args():
 
     if not args.dont_print_args:
         print_args(vars(args))
+
+    if args.cuda:
+        args.device = torch.device("cuda:{}".format(args.device_num))
+    else:
+        args.device = torch.device("cpu")
 
     return args

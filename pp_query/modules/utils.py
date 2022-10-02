@@ -69,13 +69,14 @@ def flatten(list_of_lists):
     """Turn a list of lists (or any iterable) into a flattened list."""
     return [item for sublist in list_of_lists for item in sublist]
 
-def find_closest(sample_times, true_times):
+def find_closest(sample_times, true_times, equality_allowed=False, effective_zero=0.0):
     """For each value in sample_times, find the values and associated indices in true_times that are 
     closest and strictly less than.
     
     Arguments:
         sample_times {torch.FloatTensor} -- Contains times that we want to find values closest but not over them in true_times
         true_times {torch.FloatTensor} -- Will take the closest times from here compared to sample_times
+        effective_zero {float, torch.FloatTensor} -- If both a true event time and a sample time happen to be this value exactly, then it will be included in the mask. Useful when wanting to start integration 
     
     Returns:
         dict -- Contains the closest values and corresponding indices from true_times.
@@ -92,12 +93,21 @@ def find_closest(sample_times, true_times):
     expanded_true_times = expanded_true_times.permute(*list(range(len(size)-1)), -1, -2)
 
     # Find out which true event times happened after which times in t, then mask them out 
-    mask = (expanded_true_times < sample_times.unsqueeze(-1))
+    if equality_allowed:
+        mask = (expanded_true_times <= sample_times.unsqueeze(-1))
+    else:
+        mask = (expanded_true_times < sample_times.unsqueeze(-1))
+    if isinstance(effective_zero, float):
+        mask = mask | ((expanded_true_times == 0.0) & (sample_times.unsqueeze(-1) == 0.0))
+    else:
+        assert((len(effective_zero.shape) == 1) and (effective_zero.shape[0] == true_times.shape[0]))  # Single (batch) dimension 
+        print(effective_zero.shape, expanded_true_times.shape, sample_times.shape)
+        raise NotImplementedError
     adjusted_expanded_true_times = torch.where(mask, expanded_true_times, -expanded_true_times*float('inf'))
 
     # Find the largest, unmasked values. These are the closest true event times that happened prior to the times in t.
     closest_values, closest_indices = adjusted_expanded_true_times.max(dim=-1)
-    closest_values = torch.nan_to_num(closest_values, nan=0.0)  # cover edge case when sample_times == 0.0
+    #closest_values = torch.nan_to_num(closest_values, nan=0.0)  # cover edge case when sample_times == 0.0
 
     return {
         "closest_values": closest_values,

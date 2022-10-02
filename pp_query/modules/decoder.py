@@ -383,7 +383,7 @@ class RMTPPDecoder(nn.Module):
         hidden_states = torch.cat(hidden_states, dim=1)
         return hidden_states
 
-    def get_intensity(self, state_values, state_times, timestamps):
+    def get_intensity(self, state_values, state_times, timestamps, mark_mask=1.0):
         """Gennerate intensity values for a point process.
         
         Arguments:
@@ -410,6 +410,9 @@ class RMTPPDecoder(nn.Module):
         all_log_mark_intensities = hs_logits + time_logits
         
         intensity_values = torch.exp(all_log_mark_intensities)
+        if isinstance(mark_mask, torch.FloatTensor):
+            intensity_values *= mark_mask.view(*((1,)*(len(intensity_values.shape)-1)), -1)
+            all_log_mark_intensities = intensity_values.log()
         total_intensity = intensity_values.sum(dim=-1)
 
         return {

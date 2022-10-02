@@ -53,7 +53,7 @@ class PPModel(nn.Module):
         self, 
         decoder, 
         num_channels,
-        dominating_rate=100.,
+        dominating_rate=1000.,
     ):
         """Constructor for general PPModel class.
         
@@ -303,18 +303,33 @@ class PPModel(nn.Module):
 
         return weight_decay_params, no_weight_decay_params
 
-    def compensator(self, a, b, conditional_times, conditional_marks, num_int_pts=100):
+    def compensator(self, a, b, conditional_times, conditional_marks, num_int_pts=100, calculate_bounds=False):
         assert(a < b)
+        results = {}
         state_dict = self.get_states(conditional_marks, conditional_times)
-        vals = 2*self.get_intensity(
+        ts = torch.linspace(a, b, num_int_pts).to(next(self.parameters()).device)
+        vals = self.get_intensity(
             state_values=state_dict["state_values"], 
             state_times=state_dict["state_times"], 
-            timestamps=torch.linspace(a, b, num_int_pts).to(next(self.parameters()).device).expand(*conditional_times.shape[:-1], -1), 
+            timestamps=ts.expand(*conditional_times.shape[:-1], -1), 
             marks=None,
         )["all_log_mark_intensities"].exp()
-        vals[..., 0, :], vals[..., -1, :] = 0.5*vals[..., 0, :], 0.5*vals[..., -1, :]
-        delta = (b-a)/(num_int_pts-1)
-        return delta * vals.sum(dim=-2) / 2
+        if calculate_bounds:
+            delta = (b-a)/(num_int_pts-1)
+            left_pts, right_pts = vals[..., :-1, :], vals[..., 1:, :]
+            upper_lower_pts = torch.stack((left_pts, right_pts), dim=-1)
+            upper_vals, lower_vals = upper_lower_pts.max(dim=-1).values, upper_lower_pts.min(dim=-1).values
+            results["upper_bound"] = upper_vals.sum(dim=-2) * delta
+            results["lower_bound"] = lower_vals.sum(dim=-2) * delta
+            results["integral"] = upper_lower_pts.mean(dim=-1).sum(dim=-2) * delta
+        else:
+        #    vals[..., 0, :], vals[..., -1, :] = 0.5*vals[..., 0, :], 0.5*vals[..., -1, :]
+        #    results["integral"] = torch.trapezoid(vals, dx=delta, dim=-2)#delta * vals.sum(dim=-2)
+            results["integral"] = torch.trapezoid(vals, x=torch.linspace(a, b, num_int_pts), dim=-2)#delta * vals.sum(dim=-2)
+        if calculate_bounds:
+            assert(results["lower_bound"].sum().item() <= results["integral"].sum().item() <= results["upper_bound"].sum().item())
+
+        return results
 
     def compensator_grid(self, a, b, conditional_times, conditional_marks, num_int_pts, *args, **kwargs):
         if conditional_times is None:
@@ -323,7 +338,7 @@ class PPModel(nn.Module):
         state_dict = self.get_states(conditional_marks, conditional_times)
         num_int_pts += 1  # increment as we use n+1 samples to generate n integral results
         comps = torch.zeros((*conditional_times.shape[:-1], num_int_pts, self.num_channels), dtype=torch.float32)
-        ts = torch.linspace(a, b, num_int_pts)
+        ts = torch.linspace(a, b, num_int_pts).expand(*conditional_times.shape[:-1], -1)
         intensities = self.get_intensity(
             state_values=state_dict["state_values"],
             state_times=state_dict["state_times"],
