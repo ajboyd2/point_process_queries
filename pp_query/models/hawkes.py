@@ -22,7 +22,7 @@ class HawkesModel(PPModel):
             encoder {torch.nn.Module} -- Neural network encoder that accepts marks and timestamps and returns a single latent state (default: {None})
             aggregator {torch.nn.Module} -- Module that turns a tensor of hidden states into a latent vector (with noise added during training) (default: {None})
         """
-        super().__init__(decoder=None)
+        super().__init__(decoder=None, num_channels=num_marks)
 
         self.num_marks = num_marks
         self.alphas = torch.nn.Embedding(
@@ -33,14 +33,14 @@ class HawkesModel(PPModel):
             num_embeddings=num_marks,
             embedding_dim=num_marks,
         )
-        self.alphas.weight.data = torch.randn_like(self.alphas.weight.data) * 0.0001
-        self.deltas.weight.data = torch.randn_like(self.deltas.weight.data) * 0.0001
+        self.alphas.weight.data = torch.rand_like(self.alphas.weight.data)*0.5+0.3  #torch.randn_like(self.alphas.weight.data) * 0.0001
+        self.deltas.weight.data = torch.rand_like(self.deltas.weight.data)*0.4+0.8  #torch.randn_like(self.deltas.weight.data) * 0.0001
         
-        self.mus = torch.nn.Parameter(torch.randn(num_marks,) * 0.0001)
-        self.s = torch.nn.Parameter(torch.randn(num_marks,) * 0.0001)
+        self.mus = torch.nn.Parameter(torch.rand(num_marks,)*0.4+0.1)     #torch.nn.Parameter(torch.randn(num_marks,) * 0.0001)
+        self.s = torch.nn.Parameter(torch.rand(num_marks,)*0.0+1)       #torch.nn.Parameter(torch.randn(num_marks,) * 0.0001)
         self.bounded = bounded
 
-    def get_states(self, tgt_marks, tgt_timestamps, latent_state):
+    def get_states(self, tgt_marks, tgt_timestamps):
         """Get the hidden states that can be used to extract intensity values from."""
 
         return {
@@ -48,9 +48,12 @@ class HawkesModel(PPModel):
             "state_times": tgt_timestamps,
         }
 
-    def get_intensity(self, state_values, state_times, timestamps, latent_state, marks=None):
+    def get_intensity(self, state_values, state_times, timestamps, marks=None, state_marks=None, mark_mask=1.0):
         """Given a set of hidden states, timestamps, and latent_state get a tensor representing intensity values at timestamps.
         Specify marks to get intensity values for specific channels."""
+
+        if (state_values is None) and (state_marks is not None):
+            state_values = self.get_states(state_marks, state_times)["state_values"]
 
         batch_size, seq_len = timestamps.shape
         hist_len = state_times.shape[1]
@@ -76,6 +79,8 @@ class HawkesModel(PPModel):
             s = self.s.unsqueeze(0).unsqueeze(0).expand(batch_size, seq_len, -1).exp()
             all_mark_intensities = s * torch.log(1 + torch.exp(all_mark_intensities / s))
 
+        if isinstance(mark_mask, torch.FloatTensor):
+            all_mark_intensities *= mark_mask.view(*((1,)*(len(all_mark_intensities.shape)-1)), -1)
         all_log_mark_intensities = all_mark_intensities.log()
         total_intensity = all_mark_intensities.sum(-1)
 
@@ -111,21 +116,10 @@ class HawkesModel(PPModel):
         """
         return_dict = {}
 
-        # Encoding phase
-        latent_state_dict = {
-            "latent_state": None,
-            "q_z_x": None,
-        }
-        latent_state = latent_state_dict["latent_state"]
-        return_dict["latent_state"] = latent_state
-        return_dict["q_z_x"] = latent_state_dict["q_z_x"]
-        return_dict["p_z"] = None
-
         # Decoding phase
         intensity_state_dict = self.get_states(
             tgt_marks=tgt_marks,
             tgt_timestamps=tgt_timestamps,
-            latent_state=latent_state,
         )
         return_dict["state_dict"] = intensity_state_dict
 
@@ -133,7 +127,6 @@ class HawkesModel(PPModel):
             state_values=intensity_state_dict["state_values"],
             state_times=intensity_state_dict["state_times"],
             timestamps=tgt_timestamps,
-            latent_state=latent_state,
             marks=tgt_marks,
         )
         return_dict["tgt_intensities"] = tgt_intensities
@@ -145,7 +138,6 @@ class HawkesModel(PPModel):
                 state_values=intensity_state_dict["state_values"],
                 state_times=intensity_state_dict["state_times"],
                 timestamps=sample_timestamps,
-                latent_state=latent_state,
                 marks=None,
             )
             return_dict["sample_intensities"] = sample_intensities
