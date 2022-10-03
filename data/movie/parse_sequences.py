@@ -86,7 +86,7 @@ def process_sequences(args, sequences):
     print("   Num Sequences prior to Filtering:", len(sequences))
     for u in tqdm(list(sequences.keys())):
         if args.min_events <= len(sequences[u]) <= args.max_events:
-            sequences[u] = tuple(zip(*sorted(sequences[u], key=lambda x: x[0])))  # Sort by timestamps and then split into two lists: one for timestmaps and one for marks
+            sequences[u] = list(zip(*sorted(sequences[u], key=lambda x: x[0])))  # Sort by timestamps and then split into two lists: one for timestmaps and one for marks
             if args.start_window_is_base_time:
                 sequences[u][0] = [(t - BASE_TIME) / args.time_norm for t in sequences[u][0]]
             else:
