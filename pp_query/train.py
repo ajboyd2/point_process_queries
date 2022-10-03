@@ -197,7 +197,7 @@ def get_data(args):
         file_path=args.train_data_path, 
         args=args, 
         keep_pct=args.train_data_percentage, 
-        set_dominating_rate=args.sample_generations,
+        set_dominating_rate=args.evaluate,
         is_test=False,
     )
     args.num_channels = train_dataset.vocab_size

@@ -8,7 +8,7 @@ from abc import ABC, abstractmethod
 
 
 class CensoredPP:
-    def __init__(self, base_process, observed_marks, num_sampled_sequences, use_same_seqs_for_ratio=False, batch_size=128, device=torch.device("cpu")):
+    def __init__(self, base_process, observed_marks, num_sampled_sequences, use_same_seqs_for_ratio=False, batch_size=128, device=torch.device("cpu"), use_tqdm=True):
         assert(len(observed_marks) > 0)  # K=6, observed_marks=[0,1,2] ==> censored_marks=[3,4,5]
         assert(num_sampled_sequences > 0)
 
@@ -32,6 +32,7 @@ class CensoredPP:
 
         self.batch_size = batch_size
         self.device = device
+        self.use_tqdm = use_tqdm
 
     @torch.no_grad()
     def gen_cond_seqs(
@@ -58,7 +59,7 @@ class CensoredPP:
         cond_times, cond_marks = [], []
         mark_mask = torch.ones((self.marks,), dtype=torch.float32).to(self.device)
         mark_mask[self.observed_marks] = 0.0  # Only sample the censored marks (to marginalize them out)
-        for _ in tqdm(range(n)):
+        for _ in tqdm(range(n), disable=not self.use_tqdm):
             times, marks = self.base_process.sample_points(
                 T=right_window, 
                 left_window=left_window, 
@@ -197,7 +198,7 @@ class CensoredPP:
         mark_mask = torch.ones((self.marks,), dtype=torch.float32).to(self.device)
         if len(self.censored_marks) > 0:
             mark_mask[self.censored_marks] = 0.0
-        for i in tqdm(range(num_seqs)):
+        for i in tqdm(range(num_seqs), disable=not self.use_tqdm):
             numer_times, numer_marks = cond_seqs["numer_cond_times"][i], cond_seqs["numer_cond_marks"][i]
             denom_times, denom_marks = cond_seqs["denom_cond_times"][i], cond_seqs["denom_cond_marks"][i]
 
@@ -212,11 +213,18 @@ class CensoredPP:
                 mark_mask=1.0,
             )["all_log_mark_intensities"].exp()*mark_mask.unsqueeze(0)
             numer_comp = self.base_process.compensator_grid(a, b, numer_times, numer_marks, num_samples-1) * mark_mask.unsqueeze(0) #[np.newaxis, :]
-            denom_comp = self.base_process.compensator_grid(a, b, denom_times, denom_marks, num_samples-1) * mark_mask.unsqueeze(0) #[np.newaxis, :]
+            if self.use_same_seqs_for_ratio:
+                denom_comp = numer_comp
+            else:
+                denom_comp = self.base_process.compensator_grid(a, b, denom_times, denom_marks, num_samples-1) * mark_mask.unsqueeze(0) #[np.newaxis, :]
 
             if censoring_start_time < a:
-                numer_comp += self.base_process.compensator(censoring_start_time, a, numer_times, numer_marks)["integral"] * mark_mask
-                denom_comp += self.base_process.compensator(censoring_start_time, a, denom_times, denom_marks)["integral"] * mark_mask
+                nc = self.base_process.compensator(censoring_start_time, a, numer_times, numer_marks)["integral"] * mark_mask
+                numer_comp += nc
+                if self.use_same_seqs_for_ratio:
+                    denom_comp += nc
+                else:
+                    denom_comp += self.base_process.compensator(censoring_start_time, a, denom_times, denom_marks)["integral"] * mark_mask
 
             numer.append(intensity * torch.exp(-torch.sum(numer_comp, dim=-1, keepdim=True)) / num_seqs)
             denom.append(torch.exp(-torch.sum(denom_comp, dim=-1, keepdim=True)) / num_seqs)

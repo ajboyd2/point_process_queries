@@ -216,6 +216,8 @@ class PPModel(nn.Module):
             marks = torch.LongTensor([[]], device=next(self.parameters()).device)
             timestamps = torch.FloatTensor([[]], device=next(self.parameters()).device)
 
+        proposal_batch_size = max(min(proposal_batch_size, int(dominating_rate*(T-left_window)*5)), 10)  # dominating_rate*(T-left_window) is the expected number of proposal times to draw from [left_window, T]
+
         state = self.forward(marks, timestamps)
         state_values, state_times = state["state_dict"]["state_values"], state["state_dict"]["state_times"]
         
