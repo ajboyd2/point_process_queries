@@ -57,6 +57,7 @@ def evaluation_args(parser):
     group = parser.add_argument_group("Evaluation specification arguments.")
     group.add_argument("--valid_data_path", nargs="+", type=str, default=["./data/1_pp/validation.pickle"], help="Path to validation data file.")
     group.add_argument("--test_data_path", nargs="+", type=str, default=["./data/1_pp/validation.pickle"], help="Path to testing data file.")
+    group.add_argument("--valid_epochs", type=int, default=5, help="Frequency of training epochs to perform validation.")
     group.add_argument("--top_k", type=int, default=0, help="Enables top_k sampling for marks.")
     group.add_argument("--top_p", type=float, default=0.0, help="Enables top_p sampling for marks.")
     group.add_argument("--pin_test_memory", action="store_true", help="Pin memory for test dataloader.")
