@@ -208,7 +208,7 @@ class PPModel(nn.Module):
             }
 
         
-    def sample_points(self, marks, timestamps, dominating_rate=None, T=float('inf'), left_window=0.0, length_limit=float('inf'), mark_mask=1.0, top_k=0, top_p=0.0):
+    def sample_points(self, marks, timestamps, dominating_rate=None, T=float('inf'), left_window=0.0, length_limit=float('inf'), mark_mask=1.0, top_k=0, top_p=0.0, proposal_batch_size=1024):
         assert((T < float('inf')) or (length_limit < float('inf')))
         if dominating_rate is None:
             dominating_rate = self.dominating_rate
@@ -220,24 +220,32 @@ class PPModel(nn.Module):
         state_values, state_times = state["state_dict"]["state_values"], state["state_dict"]["state_times"]
         
         dist = torch.distributions.Exponential(dominating_rate)
+        dist.rate = dist.rate.to(state_values.device)
         last_time = left_window 
-        new_time = last_time + dist.sample(sample_shape=torch.Size((1,1))).to(state_values.device)
+        #new_time = last_time + dist.sample(sample_shape=torch.Size((1,1))).to(state_values.device)
+        new_times = last_time + dist.sample(sample_shape=torch.Size((1, proposal_batch_size))).cumsum(dim=-1)
         sampled_times = []
         sampled_marks = []
-        while (new_time < T) and (timestamps.shape[-1] < length_limit):
+        #while (new_time < T) and (timestamps.shape[-1] < length_limit):
+        while (new_times <= T).any() and (timestamps.shape[-1] < length_limit):
+            new_times = new_times[new_times <= T].unsqueeze(0)
             sample_intensities = self.get_intensity(
                 state_values=state_values,
                 state_times=state_times,
-                timestamps=new_time,
+                timestamps=new_times,
                 marks=None,
                 mark_mask=mark_mask,
-            ) 
+            )
 
-            if torch.rand_like(new_time) <= (sample_intensities["total_intensity"] / (dominating_rate)):
+            acceptances = torch.rand_like(new_times) <= (sample_intensities["total_intensity"] / dominating_rate)
+            if acceptances.any():
+                idx = acceptances.squeeze(0).float().argmax()
+                new_time = new_times[:, [idx]]
+
                 if top_k > 0 or top_p > 0:
-                    logits = top_k_top_p_filtering(sample_intensities["all_log_mark_intensities"], top_k=top_k, top_p=top_p)
+                    logits = top_k_top_p_filtering(sample_intensities["all_log_mark_intensities"][:, [idx], :], top_k=top_k, top_p=top_p)
                 else:
-                    logits = sample_intensities["all_log_mark_intensities"]
+                    logits = sample_intensities["all_log_mark_intensities"][:, [idx], :]
                 mark_probs = F.softmax(logits, -1) #(sample_intensities["all_log_mark_intensities"] - sample_intensities["total_intensity"].unsqueeze(-1).log()).exp()
                 mark_dist = torch.distributions.Categorical(mark_probs)
                 new_mark = mark_dist.sample()
@@ -248,8 +256,11 @@ class PPModel(nn.Module):
 
                 state = self.forward(marks, timestamps)
                 state_values, state_times = state["state_dict"]["state_values"], state["state_dict"]["state_times"]
+                last_time = new_times[:, idx].squeeze()
+            else:
+                last_time = new_times.max()
         
-            new_time = new_time + dist.sample(sample_shape=torch.Size((1,1))).to(state_values.device)
+            new_times = last_time + dist.sample(sample_shape=(1, proposal_batch_size)).cumsum(dim=-1)
 
         assumption_violation = False
         for _ in range(5):
@@ -333,12 +344,12 @@ class PPModel(nn.Module):
 
     def compensator_grid(self, a, b, conditional_times, conditional_marks, num_int_pts, *args, **kwargs):
         if conditional_times is None:
-            conditional_times, conditional_marks = torch.FloatTensor([[]]), torch.LongTensor([[]])
+            conditional_times, conditional_marks = torch.FloatTensor([[]]).to(next(self.parameters()).device), torch.LongTensor([[]]).to(next(self.parameters()).device)
 
         state_dict = self.get_states(conditional_marks, conditional_times)
         num_int_pts += 1  # increment as we use n+1 samples to generate n integral results
-        comps = torch.zeros((*conditional_times.shape[:-1], num_int_pts, self.num_channels), dtype=torch.float32)
-        ts = torch.linspace(a, b, num_int_pts).expand(*conditional_times.shape[:-1], -1)
+        comps = torch.zeros((*conditional_times.shape[:-1], num_int_pts, self.num_channels), dtype=torch.float32).to(conditional_times.device)
+        ts = torch.linspace(a, b, num_int_pts).expand(*conditional_times.shape[:-1], -1).to(conditional_times.device)
         intensities = self.get_intensity(
             state_values=state_dict["state_values"],
             state_times=state_dict["state_times"],

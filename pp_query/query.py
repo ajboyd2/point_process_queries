@@ -192,9 +192,9 @@ class CensoredPP:
 
         numer, denom = [], []
 
-        ts = torch.linspace(a, b, num_samples)
+        ts = torch.linspace(a, b, num_samples).to(self.device)
         num_seqs = self.num_sampled_sequences // 2
-        mark_mask = torch.ones((self.marks,), dtype=torch.float32)
+        mark_mask = torch.ones((self.marks,), dtype=torch.float32).to(self.device)
         if len(self.censored_marks) > 0:
             mark_mask[self.censored_marks] = 0.0
         for i in tqdm(range(num_seqs)):
@@ -413,21 +413,22 @@ class PositionalMarkQuery(Query):
             else:
                 self.mark_restrictions.append(m)
         self.max_events = len(mark_restrictions)
-        self.restricted_positions = torch.BoolTensor([len(m) > 0 for m in self.mark_restrictions])    # If true, then we will need to integrate for events in that position
+        self.restricted_positions = torch.BoolTensor([len(m) > 0 for m in self.mark_restrictions]).to(device)  # If true, then we will need to integrate for events in that position
         self.batch_size = batch_size
         self.device = device
         self.use_tqdm = use_tqdm
 
     @torch.no_grad()
     def naive_estimate(self, model, num_sample_seq, conditional_times=None, conditional_marks=None):
-        mark_res_array = torch.zeros((self.max_events, model.num_channels), dtype=torch.int32)
+        mark_res_array = torch.zeros((self.max_events, model.num_channels), dtype=torch.int32).to(self.device)
         for i,m in zip(range(self.max_events), self.mark_restrictions):
             mark_res_array[i,m] = 1
 
         res = 0.0    # for a sample to count as 1 in the average, it must respect _every_ mark restriction
+        indices = torch.arange(0, self.max_events).to(self.device)
         for _ in tqdm(range(num_sample_seq), disable=not self.use_tqdm): 
             times, marks = model.sample_points(
-                left_window=0 if conditional_times is None else conditional_times.max()+1e-32, 
+                left_window=0 if conditional_times is None else conditional_times.max(), 
                 length_limit=self.max_events + (0 if conditional_times is None else conditional_times.numel()), 
                 timestamps=conditional_times, 
                 marks=conditional_marks, 
@@ -436,7 +437,7 @@ class PositionalMarkQuery(Query):
 
             times, marks = times.squeeze(0), marks.squeeze(0)
             marks = marks[(0 if conditional_marks is None else conditional_marks.numel()):]  # only take the sampled marks, not the conditional ones
-            if mark_res_array[torch.arange(0, self.max_events), marks].sum() == 0:
+            if mark_res_array[indices, marks].sum() == 0:
                 res += 1. / num_sample_seq
         return res
 
@@ -444,7 +445,7 @@ class PositionalMarkQuery(Query):
     def proposal_dist_sample(self, model, conditional_times=None, conditional_marks=None):
         times, marks = conditional_times, conditional_marks
         for i in range(self.max_events):
-            mark_mask = torch.ones((model.num_channels,), dtype=torch.float32)
+            mark_mask = torch.ones((model.num_channels,), dtype=torch.float32).to(self.device)
             mark_mask[self.mark_restrictions[i]] = 0.0
 
             times, marks = model.sample_points(
@@ -548,3 +549,16 @@ class UnbiasedHittingTimeQuery(TemporalMarkQuery):
             result["lower_est"], result["upper_est"] = 1 - result["upper_est"], 1 - result["lower_est"]  # Need to calculate the complement and swap upper and lower bounds
         return result
 
+class MarginalMarkQuery(PositionalMarkQuery):
+
+    def __init__(self, n, marks_of_interest, total_marks, batch_size=128, device=torch.device('cpu'), use_tqdm=True):
+        assert(isinstance(n, int) and n > 0)
+        assert(isinstance(marks_of_interest, (int, list)))
+        if isinstance(marks_of_interest, int):
+            marks_of_interest = [marks_of_interest]
+        super().__init__(
+            mark_restrictions=[[]]*(n-1) + [[mark for mark in range(total_marks) if mark not in marks_of_interest]], 
+            batch_size=batch_size, 
+            device=device,
+            use_tqdm=use_tqdm,
+        )
