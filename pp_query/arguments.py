@@ -57,19 +57,18 @@ def evaluation_args(parser):
     group = parser.add_argument_group("Evaluation specification arguments.")
     group.add_argument("--valid_data_path", nargs="+", type=str, default=["./data/1_pp/validation.pickle"], help="Path to validation data file.")
     group.add_argument("--test_data_path", nargs="+", type=str, default=["./data/1_pp/validation.pickle"], help="Path to testing data file.")
-    group.add_argument("--valid_epochs", type=int, default=5, help="Number of epochs to execute validation on.")
-    # group.add_argument("--valid_to_test_pct", type=float, default=0.3, help="Percentage of held out data to be used for validation, rest is used for testing at the end.")
-    group.add_argument("--visualize", action="store_true", help="In evaluate.py selects the visualization script to run.")
-    group.add_argument("--sample_generations", action="store_true", help="In evaluate.py selects the generations script to run.")
-    group.add_argument("--next_event_prediction", action="store_true", help="In evaluate.py selects the next event prediction task to run.")
-    group.add_argument("--anomaly_detection", action="store_true", help="In evaluate.py selects the anomaly detection task to run.")
-    group.add_argument("--num_samples", type=int, default=1024, help="Number of sequences to generate samples from.")
-    group.add_argument("--samples_per_sequence", type=int, default=1, help="Number of samples to generate per sequence.")
     group.add_argument("--top_k", type=int, default=0, help="Enables top_k sampling for marks.")
     group.add_argument("--top_p", type=float, default=0.0, help="Enables top_p sampling for marks.")
-    group.add_argument("--likelihood_over_time", action="store_true", help="In evaluate.py analyzes likelihood over time for a given model.")
-    group.add_argument("--likelihood_resolution", type=float, default=1.0, help="When likelihood_over_time is enabled, this defines the bucket width to bin likelihood differences into.")
     group.add_argument("--pin_test_memory", action="store_true", help="Pin memory for test dataloader.")
+    group.add_argument("--calculate_is_bounds", action="store_true", help="Calculate upper and lower integration 'bounds' using Reimannian integration for Importance Sampling estimate.")
+    group.add_argument("--hitting_time_queries", action="store_true", help="Perform hitting time queries.")
+    group.add_argument("--marginal_mark_queries", action="store_true", help="Perform marginal mark queries.")
+    group.add_argument("--a_before_b_queries", action="store_true", help="Perform a before b queries.")
+    group.add_argument("--num_queries", type=int, default=30, help="Number of queries to be conducted in experiments.")
+    group.add_argument("--gt_num_seqs", type=int, default=1000, help="Number of sequences to use when estimating 'ground truth'.")
+    group.add_argument("--gt_num_int_pts", type=int, default=1000, help="Number of integration points to use when estimating 'ground truth'.")
+    group.add_argument("--num_seqs", nargs="+", type=int, default=[2, 4, 8, 16, 64, 256], help="List of number of sequences to use when performing estimates.")
+    group.add_argument("--num_int_pts", nargs="+", type=int, default=[1000], help="List of number of integration points to use when performing estimates.")
     #group.add_argument("--", type=, default=, help="")pin_test_memory
 
 def sampling_args(parser):
@@ -108,5 +107,7 @@ def get_args():
         args.device = torch.device("cuda:{}".format(args.device_num))
     else:
         args.device = torch.device("cpu")
+
+    args.evaluate = False  # `evaluate.py` will overwrite this to True
 
     return args
