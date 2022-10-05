@@ -3,6 +3,7 @@ Command-line utility for visualizing a model's outputs
 """
 # import matplotlib.pyplot as plt
 # import seaborn as sns
+from mmap import ACCESS_COPY
 import numpy as np
 import os
 import pickle
@@ -42,19 +43,20 @@ def save_results(args, results, suffix=""):
         pickle.dump(results, f)
     print_log("Saved results at {}".format(fp))
 
-def _setup_hitting_time_query(args, batch, model, num_seqs):
+def _setup_hitting_time_query(args, batch, model, num_seqs, use_tqdm=False):
     if args.cuda:
         batch = {k:v.cuda(torch.cuda.current_device()) for k,v in batch.items()}
 
     times, marks = batch["tgt_times"], batch["tgt_marks"]
     length = times.numel()
-    next_time = times[0, (length//2)].item()
-    next_mark = marks[0, (length//2)].item()
-    times, marks = times[..., :length//2], marks[..., :length//2]
+    to_condition_on = min(length-1, 5)  # length // 2
+    next_time = times[0, to_condition_on].item()
+    next_mark = marks[0, to_condition_on].item()
+    times, marks = times[..., :to_condition_on], marks[..., :to_condition_on]
     max_time = times.max().item()
     up_to = max(min((next_time-max_time)*10, 1.0), 1e-5)
 
-    tqm = UnbiasedHittingTimeQuery(up_to=up_to, hitting_marks=next_mark, batch_size=128, device=args.device, use_tqdm=False)
+    tqm = UnbiasedHittingTimeQuery(up_to=up_to, hitting_marks=next_mark, batch_size=128, device=args.device, use_tqdm=use_tqdm)
     cpp = CensoredPP(
         base_process=model, 
         observed_marks=[next_mark], 
@@ -62,7 +64,7 @@ def _setup_hitting_time_query(args, batch, model, num_seqs):
         use_same_seqs_for_ratio=False,
         batch_size=128,
         device=args.device,
-        use_tqdm=False,
+        use_tqdm=use_tqdm,
     )
     same_cpp = CensoredPP(
         base_process=model, 
@@ -71,7 +73,7 @@ def _setup_hitting_time_query(args, batch, model, num_seqs):
         use_same_seqs_for_ratio=True,
         batch_size=128,
         device=args.device,
-        use_tqdm=False,
+        use_tqdm=use_tqdm,
     )
 
     return times, marks, max_time, up_to, tqm, cpp, same_cpp
@@ -146,40 +148,151 @@ def _hitting_time_queries_gt(args, model, dataloader):
     num_int_pts = args.gt_num_int_pts
     num_queries = min(args.num_queries, len(dataloader))
     gts = []
-    for i, batch in tqdm(enumerate(dataloader)):
-        if i == num_queries:
-            break
-
-        times, marks, _, _, tqm, _, _ = _setup_hitting_time_query(args, batch, model, num_seqs)
+    effs = []
+    dl_iter = iter(dataloader)
+    for _ in tqdm(range(num_queries)):
+        batch = next(dl_iter)
+        times, marks, _, _, tqm, _, _ = _setup_hitting_time_query(args, batch, model, num_seqs, use_tqdm=False)
         is_res = tqm.estimate(model, num_seqs, num_int_pts, conditional_times=times, conditional_marks=marks, calculate_bounds=False)
         gts.append(is_res["est"].item())
+        effs.append(is_res["rel_eff"].item())
 
-    return gts
+    return gts, effs
 
 def hitting_time_queries(args, model, dataloader):
     file_suffix = datetime.datetime.now().strftime('%m_%d_%Y_%H_%M_%S')
     seed = args.seed
-    results = {"estimates": {}, "gt": None}
-    for i, num_seqs in enumerate(args.num_seqs):
-        ns_key = "num_seqs_{}".format(num_seqs)
-        results["estimates"][ns_key] = {}
-        for j, num_int_pts in enumerate(args.num_int_pts):
-            np_key = "num_int_pts_{}".format(num_int_pts)
-            args.seed = seed + i*len(args.num_int_pts) + j
-            set_random_seed(args)
+    results = {"estimates": {}, "gt": None, "gt_eff": None}
 
-            results["estimates"][ns_key][np_key] = _hitting_time_queries(args, model, dataloader, num_seqs, num_int_pts)
-            save_results(args, results, file_suffix)
-    
     args.seed = seed + len(args.num_seqs)*len(args.num_int_pts) + 1
     set_random_seed(args)
-    results["gt"] = _hitting_time_queries_gt(args, model, dataloader)
+    results["gt"], results["gt_eff"] = _hitting_time_queries_gt(args, model, dataloader)
+    save_results(args, results, file_suffix)
 
+    if not args.just_gt:
+        for i, num_seqs in enumerate(args.num_seqs):
+            ns_key = "num_seqs_{}".format(num_seqs)
+            results["estimates"][ns_key] = {}
+            for j, num_int_pts in enumerate(args.num_int_pts):
+                np_key = "num_int_pts_{}".format(num_int_pts)
+                args.seed = seed + i*len(args.num_int_pts) + j
+                set_random_seed(args)
+
+                results["estimates"][ns_key][np_key] = _hitting_time_queries(args, model, dataloader, num_seqs, num_int_pts)
+                save_results(args, results, file_suffix)
+    
     save_results(args, results, file_suffix)
     return results
 
+
+def _setup_marginal_mark_query(args, batch, model, num_seqs, use_tqdm=False):
+    if args.cuda:
+        batch = {k:v.cuda(torch.cuda.current_device()) for k,v in batch.items()}
+
+    times, marks = batch["tgt_times"], batch["tgt_marks"]
+    length = times.numel()
+    to_condition_on = min(length-1, 5)  # length // 2
+    
+    marks_of_interest = torch.unique(marks[0, ...])
+    accepted_marks = torch.rand(marks_of_interest.shape).to(marks.device)
+    accepted_marks = accepted_marks <= max(0.3, accepted_marks.min())  # Ensures at least one mark will be accepted
+    accepted_marks = marks_of_interest[accepted_marks]
+
+    times, marks = times[..., :to_condition_on], marks[..., :to_condition_on]
+    
+    mmq = MarginalMarkQuery(args.marg_query_n, accepted_marks, total_marks=model.num_channels, batch_size=128, device=args.device, use_tqdm=use_tqdm)
+
+    return times, marks, mmq
+
+def _marginal_mark_queries(args, model, dataloader, num_seqs, num_int_pts):
+    results = {
+        "is_est": [],
+        "naive_est": [],
+        "naive_var": [],
+        "is_var": [],
+        "rel_eff": [],
+        "avg_is_time": 0.0,
+        "avg_naive_time": 0.0,
+    }
+    if args.calculate_is_bounds:
+        results["is_lower"] = []
+        results["is_upper"] = []
+    
+    num_queries = min(args.num_queries, len(dataloader))
+
+    print_log("Estimating {} Total Queries using {} Sequences and {} Integration Points Each".format(num_queries, num_seqs, num_int_pts))
+    dl_iter = iter(dataloader)
+    for i in tqdm(range(num_queries)):
+        batch = next(dl_iter)
+        if i == num_queries:
+            break
+
+        times, marks, mmq = _setup_marginal_mark_query(args, batch, model, num_seqs)
+
+        is_t0 = time.perf_counter()
+        is_res = mmq.estimate(model, num_seqs, num_int_pts, conditional_times=times, conditional_marks=marks, calculate_bounds=args.calculate_is_bounds)
+        is_t1 = time.perf_counter()
+        is_res = {k:v.item() for k,v in is_res.items()}
+
+        naive_t0 = time.perf_counter()
+        naive_res = mmq.naive_estimate(model, num_seqs, conditional_times=times, conditional_marks=marks)
+        naive_t1 = time.perf_counter()
+        
+        results["is_est"].append(is_res["est"])
+        results["naive_var"].append(is_res["naive_var"])
+        results["is_var"].append(is_res["is_var"])
+        results["rel_eff"].append(is_res["rel_eff"])
+        results["naive_est"].append(naive_res)
+
+        if args.calculate_is_bounds:
+            results["is_lower"].append(is_res["lower_est"])
+            results["is_upper"].append(is_res["upper_est"])
+
+        results["avg_is_time"] += (is_t1 - is_t0) / num_queries
+        results["avg_naive_time"] += (naive_t1 - naive_t0) / num_queries
+
+    return results
+
+def _marginal_mark_queries_gt(args, model, dataloader):
+    num_seqs = args.gt_num_seqs
+    num_int_pts = args.gt_num_int_pts
+    num_queries = min(args.num_queries, len(dataloader))
+    gts = []
+    effs = []
+    dl_iter = iter(dataloader)
+    for _ in tqdm(range(num_queries)):
+        batch = next(dl_iter)
+        times, marks, mmq = _setup_marginal_mark_query(args, batch, model, num_seqs, use_tqdm=False)
+        is_res = mmq.estimate(model, num_seqs, num_int_pts, conditional_times=times, conditional_marks=marks, calculate_bounds=False)
+        gts.append(is_res["est"].item())
+        effs.append(is_res["rel_eff"].item())
+
+    return gts, effs
+
 def marginal_mark_queries(args, model, dataloader):
-    pass
+    file_suffix = datetime.datetime.now().strftime('%m_%d_%Y_%H_%M_%S')
+    seed = args.seed
+    results = {"estimates": {}, "gt": None, "gt_eff": None, "nth_marginal": args.marg_query_n}
+
+    args.seed = seed + len(args.num_seqs)*len(args.num_int_pts) + 1
+    set_random_seed(args)
+    results["gt"], results["gt_eff"] = _marginal_mark_queries_gt(args, model, dataloader)
+    save_results(args, results, file_suffix)
+
+    if not args.just_gt:
+        for i, num_seqs in enumerate(args.num_seqs):
+            ns_key = "num_seqs_{}".format(num_seqs)
+            results["estimates"][ns_key] = {}
+            for j, num_int_pts in enumerate(args.num_int_pts):
+                np_key = "num_int_pts_{}".format(num_int_pts)
+                args.seed = seed + i*len(args.num_int_pts) + j
+                set_random_seed(args)
+
+                results["estimates"][ns_key][np_key] = _marginal_mark_queries(args, model, dataloader, num_seqs, num_int_pts)
+                save_results(args, results, file_suffix)
+    
+    save_results(args, results, file_suffix)
+    return results
 
 def a_before_b_queries(args, model, dataloader):
     pass    

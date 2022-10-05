@@ -1,14 +1,43 @@
-from bdb import effective
-from turtle import left
 import torch
 import torch.nn.functional as F
+import random
 
 from tqdm import tqdm
 from abc import ABC, abstractmethod
 
+from pp_query.modules.utils import flatten
+
+def batch_samples(times, marks, states, batch_size):
+    return times, marks, states
+    # time_pad = torch.finfo(torch.float32).max
+    # mark_pad = 0
+    # times, marks, states = zip(*sorted(zip(times, marks, states), key=lambda x: -x[0].shape[-1]))  # sort by lengths, decreasing
+    # batches, bt, bm, bs = [], [], [], []
+    # batch_amt, batch_len = 0, None
+    # for i in range(len(times)):
+    #     t, m, s = times[i], marks[i], states[i]
+    #     if batch_len is None:
+    #         batch_len = t.shape[-1]
+    #     else:
+    #         to_pad = batch_len - t.shape[-1]
+    #         t = F.pad(t, pad=(0, to_pad), mode='constant', value=time_pad)
+    #         m = F.pad(m, pad=(0, to_pad), mode='constant', value=mark_pad)
+    #         s = F.pad(s, pad=(0, 0, 0, to_pad), mode='replicate')
+    #     bt.append(t); bm.append(m); bs.append(s)
+
+    #     if (batch_amt >= batch_size) or (i == len(times)-1):
+    #         batches.append((
+    #             torch.cat(bt, dim=0),
+    #             torch.cat(bm, dim=0),
+    #             torch.cat(bs, dim=0),
+    #         ))
+    #         bt, bm, bs = [], [], []
+    #         batch_amt, batch_len = 0, None
+
+    # return zip(*batches)
 
 class CensoredPP:
-    def __init__(self, base_process, observed_marks, num_sampled_sequences, use_same_seqs_for_ratio=False, batch_size=128, device=torch.device("cpu"), use_tqdm=True):
+    def __init__(self, base_process, observed_marks, num_sampled_sequences, use_same_seqs_for_ratio=False, batch_size=256, device=torch.device("cpu"), use_tqdm=True):
         assert(len(observed_marks) > 0)  # K=6, observed_marks=[0,1,2] ==> censored_marks=[3,4,5]
         assert(num_sampled_sequences > 0)
 
@@ -56,39 +85,52 @@ class CensoredPP:
         self.cond_fixed_times, self.cond_fixed_marks = fixed_times, fixed_marks
 
         n = self.num_sampled_sequences
-        cond_times, cond_marks = [], []
+        # cond_times, cond_marks = [], []
         mark_mask = torch.ones((self.marks,), dtype=torch.float32).to(self.device)
         mark_mask[self.observed_marks] = 0.0  # Only sample the censored marks (to marginalize them out)
-        for _ in tqdm(range(n), disable=not self.use_tqdm):
-            times, marks = self.base_process.sample_points(
+        numer_cond_times, numer_cond_marks, numer_states = self.base_process.batch_sample_points(
+            T=right_window, 
+            left_window=left_window, 
+            timestamps=fixed_times, 
+            marks=fixed_marks,
+            dominating_rate=self.dominating_rate,
+            mark_mask=mark_mask,
+            num_samples=n // (1 if self.use_same_seqs_for_ratio else 2),
+        )
+        numer_cond_times, numer_cond_marks, _ = batch_samples(numer_cond_times, numer_cond_marks, numer_states, self.batch_size)
+
+        if self.use_same_seqs_for_ratio:
+            self.cond_seqs = {
+                "numer_cond_times": numer_cond_times,
+                "numer_cond_marks": numer_cond_marks,
+                "denom_cond_times": numer_cond_times,
+                "denom_cond_marks": numer_cond_marks,
+            }
+        else:
+            denom_cond_times, denom_cond_marks, denom_states = self.base_process.batch_sample_points(
                 T=right_window, 
                 left_window=left_window, 
                 timestamps=fixed_times, 
                 marks=fixed_marks,
                 dominating_rate=self.dominating_rate,
                 mark_mask=mark_mask,
+                num_samples=n//2,
             )
-            cond_times.append(times); cond_marks.append(marks)
 
-        if self.use_same_seqs_for_ratio:
+            denom_cond_times, denom_cond_marks, _ = batch_samples(denom_cond_times, denom_cond_marks, denom_states, self.batch_size)
+
             self.cond_seqs = {
-                "numer_cond_times": cond_times,
-                "numer_cond_marks": cond_marks,
-                "denom_cond_times": cond_times,
-                "denom_cond_marks": cond_marks,
-            }
-        else:
-            self.cond_seqs = {
-                "numer_cond_times": cond_times[:n//2],
-                "numer_cond_marks": cond_marks[:n//2],
-                "denom_cond_times": cond_times[n//2:],
-                "denom_cond_marks": cond_marks[n//2:],
+                "numer_cond_times": numer_cond_times,
+                "numer_cond_marks": numer_cond_marks,
+                "denom_cond_times": denom_cond_times,
+                "denom_cond_marks": denom_cond_marks,
             }
 
         return self.cond_seqs
 
     @torch.no_grad()
     def extend_cond_seqs(self, right_window):
+        print("EXTENDING")
         n = self.num_sampled_sequences
         cond_times, cond_marks = self.cond_seqs["numer_cond_times"], self.cond_seqs["numer_cond_marks"]
         if not self.use_same_seqs_for_ratio:
@@ -191,45 +233,70 @@ class CensoredPP:
                 fixed_marks=conditional_marks,
             )  # sampled_times and sampled_marks will be included in the resulting sequences
 
-        numer, denom = [], []
+        numer, denom = 0.0, 0.0
 
         ts = torch.linspace(a, b, num_samples).to(self.device)
         num_seqs = self.num_sampled_sequences // 2
         mark_mask = torch.ones((self.marks,), dtype=torch.float32).to(self.device)
         if len(self.censored_marks) > 0:
             mark_mask[self.censored_marks] = 0.0
-        for i in tqdm(range(num_seqs), disable=not self.use_tqdm):
-            numer_times, numer_marks = cond_seqs["numer_cond_times"][i], cond_seqs["numer_cond_marks"][i]
-            denom_times, denom_marks = cond_seqs["denom_cond_times"][i], cond_seqs["denom_cond_marks"][i]
 
-            # intensity = np.array([self.base_process.intensity(t, numer_times, numer_marks)*mark_mask for t in ts])
-            # intensity = self.base_process.get_intensity(ts, numer_times, numer_marks)*mark_mask.unsqueeze(0) #[np.newaxis, :]
+        for numer_times, numer_marks in tqdm(zip(cond_seqs["numer_cond_times"], cond_seqs["numer_cond_marks"]), disable=not self.use_tqdm):
             intensity = self.base_process.get_intensity(
                 state_values=None, 
                 state_times=numer_times, 
-                timestamps=ts.unsqueeze(0), 
+                timestamps=ts.unsqueeze(0).expand(numer_times.shape[0], -1), 
                 marks=None, 
                 state_marks=numer_marks, 
                 mark_mask=1.0,
             )["all_log_mark_intensities"].exp()*mark_mask.unsqueeze(0)
             numer_comp = self.base_process.compensator_grid(a, b, numer_times, numer_marks, num_samples-1) * mark_mask.unsqueeze(0) #[np.newaxis, :]
-            if self.use_same_seqs_for_ratio:
-                denom_comp = numer_comp
-            else:
-                denom_comp = self.base_process.compensator_grid(a, b, denom_times, denom_marks, num_samples-1) * mark_mask.unsqueeze(0) #[np.newaxis, :]
-
             if censoring_start_time < a:
                 nc = self.base_process.compensator(censoring_start_time, a, numer_times, numer_marks)["integral"] * mark_mask
                 numer_comp += nc
-                if self.use_same_seqs_for_ratio:
-                    denom_comp += nc
-                else:
-                    denom_comp += self.base_process.compensator(censoring_start_time, a, denom_times, denom_marks)["integral"] * mark_mask
+            numer += torch.sum(intensity * torch.exp(-torch.sum(numer_comp, dim=-1, keepdim=True)), dim=0, keepdim=True) / num_seqs #(num_seqs*numer_comp.shape[0])
+            if self.use_same_seqs_for_ratio:
+                denom += torch.sum(torch.exp(-torch.sum(numer_comp, dim=-1, keepdim=True)), dim=0, keepdim=True) / num_seqs #(num_seqs*numer_comp.shape[0])
 
-            numer.append(intensity * torch.exp(-torch.sum(numer_comp, dim=-1, keepdim=True)) / num_seqs)
-            denom.append(torch.exp(-torch.sum(denom_comp, dim=-1, keepdim=True)) / num_seqs)
+        if not self.use_same_seqs_for_ratio:
+            for denom_times, denom_marks in tqdm(zip(cond_seqs["denom_cond_times"], cond_seqs["denom_cond_marks"]), disable=not self.use_tqdm):
+                denom_comp = self.base_process.compensator_grid(a, b, denom_times, denom_marks, num_samples-1) * mark_mask.unsqueeze(0) #[np.newaxis, :]
+                if censoring_start_time < a:
+                    denom_comp += self.base_process.compensator(censoring_start_time, a, denom_times, denom_marks)["integral"] * mark_mask
+                denom += torch.sum(torch.exp(-torch.sum(denom_comp, dim=-1, keepdim=True)), dim=0, keepdim=True) / num_seqs #(num_seqs*denom_comp.shape[0])
+
+        # for i in tqdm(range(num_seqs), disable=not self.use_tqdm):
+        #     numer_times, numer_marks = cond_seqs["numer_cond_times"][i], cond_seqs["numer_cond_marks"][i]
+        #     denom_times, denom_marks = cond_seqs["denom_cond_times"][i], cond_seqs["denom_cond_marks"][i]
+
+        #     # intensity = np.array([self.base_process.intensity(t, numer_times, numer_marks)*mark_mask for t in ts])
+        #     # intensity = self.base_process.get_intensity(ts, numer_times, numer_marks)*mark_mask.unsqueeze(0) #[np.newaxis, :]
+        #     intensity = self.base_process.get_intensity(
+        #         state_values=None, 
+        #         state_times=numer_times, 
+        #         timestamps=ts.unsqueeze(0).expand(numer_times.shape[0], -1), 
+        #         marks=None, 
+        #         state_marks=numer_marks, 
+        #         mark_mask=1.0,
+        #     )["all_log_mark_intensities"].exp()*mark_mask.unsqueeze(0)
+        #     numer_comp = self.base_process.compensator_grid(a, b, numer_times, numer_marks, num_samples-1) * mark_mask.unsqueeze(0) #[np.newaxis, :]
+        #     if self.use_same_seqs_for_ratio:
+        #         denom_comp = numer_comp
+        #     else:
+        #         denom_comp = self.base_process.compensator_grid(a, b, denom_times, denom_marks, num_samples-1) * mark_mask.unsqueeze(0) #[np.newaxis, :]
+
+        #     if censoring_start_time < a:
+        #         nc = self.base_process.compensator(censoring_start_time, a, numer_times, numer_marks)["integral"] * mark_mask
+        #         numer_comp += nc
+        #         if self.use_same_seqs_for_ratio:
+        #             denom_comp = numer_comp
+        #         else:
+        #             denom_comp += self.base_process.compensator(censoring_start_time, a, denom_times, denom_marks)["integral"] * mark_mask
+
+        #     numer += torch.sum(intensity * torch.exp(-torch.sum(numer_comp, dim=-1, keepdim=True)), dim=0, keepdim=True) / (num_seqs*numer_comp.shape[0])
+        #     denom += torch.sum(torch.exp(-torch.sum(denom_comp, dim=-1, keepdim=True)), dim=0, keepdim=True) / (num_seqs*denom_comp.shape[0])
         
-        numer, denom = sum(numer), sum(denom)  # each are size (num_samples, marks)
+        #numer, denom = sum(numer), sum(denom)  # each are size (num_samples, marks)
         censored_intensities = numer / denom
         # Perform trapezoidal rule to approximate \int_a^b of censored_intensity(t) dt
         return torch.trapezoid(censored_intensities, x=ts, dim=-2)
@@ -273,7 +340,7 @@ class Query:
 
 class TemporalMarkQuery(Query):
 
-    def __init__(self, time_boundaries, mark_restrictions, batch_size=128, device=torch.device('cpu'), use_tqdm=True):
+    def __init__(self, time_boundaries, mark_restrictions, batch_size=256, device=torch.device('cpu'), use_tqdm=True):
         if isinstance(time_boundaries, list):
             time_boundaries = torch.FloatTensor(time_boundaries)
 
@@ -306,15 +373,19 @@ class TemporalMarkQuery(Query):
             offset = 0.0
         else:
             offset = conditional_times.max()
-        for _ in tqdm(range(num_sample_seq), disable=not self.use_tqdm): 
-            times, marks = model.sample_points(
-                T=self.max_time+offset, 
-                left_window=0+offset, 
-                timestamps=conditional_times, 
-                marks=conditional_marks, 
-                mark_mask=1.0,
-            )
-            times, marks = times.squeeze(0), marks.squeeze(0)
+
+        all_times, all_marks, _ = model.batch_sample_points(
+            T=self.max_time+offset, 
+            left_window=0+offset, 
+            timestamps=conditional_times, 
+            marks=conditional_marks, 
+            mark_mask=1.0,
+            num_samples=num_sample_seq,
+            adapt_dom_rate=True,
+        )
+        all_times = flatten([times.unbind(dim=0) for times in all_times])
+        all_marks = flatten([marks.unbind(dim=0) for marks in all_marks])
+        for times, marks in tqdm(zip(all_times, all_marks), disable=not self.use_tqdm): 
             if conditional_times is not None:
                 times = times[conditional_times.numel():] - offset
                 marks = marks[conditional_times.numel():]
@@ -332,7 +403,7 @@ class TemporalMarkQuery(Query):
         return res
 
     @torch.no_grad()
-    def proposal_dist_sample(self, model, conditional_times=None, conditional_marks=None, offset=None):
+    def proposal_dist_sample(self, model, conditional_times=None, conditional_marks=None, offset=None, num_samples=1):
         last_t = 0.0
         times, marks = conditional_times, conditional_marks
         if offset is None:
@@ -340,18 +411,56 @@ class TemporalMarkQuery(Query):
                 offset = 0.0
             else:
                 offset = conditional_times.max() #+1e-32
-        for i,t in enumerate(self.time_boundaries):
-            mark_mask = torch.ones((model.num_channels,), dtype=torch.float32).to(self.device)
-            mark_mask[self.mark_restrictions[i]] = 0.0
-            times, marks = model.sample_points(
-                T=t+offset, 
-                left_window=last_t+offset, 
-                timestamps=times, 
-                marks=marks, 
-                mark_mask=mark_mask,
-            )
-            last_t = t
-        return times.squeeze(0), marks.squeeze(0)
+        
+        mark_mask = torch.ones((len(self.time_boundaries)+1, model.num_channels,), dtype=torch.float32).to(self.device)  # +1 to have an unrestricted final mask
+        for i in range(len(self.time_boundaries)):
+            mark_mask[i, self.mark_restrictions[i]] = 0.0
+        mask_dict = {
+            "temporal_mark_restrictions": mark_mask,
+            "time_boundaries": self.time_boundaries+offset,
+        }
+
+        # for i,t in enumerate(self.time_boundaries):
+            # mark_mask = torch.ones((model.num_channels,), dtype=torch.float32).to(self.device)
+            # mark_mask[self.mark_restrictions[i]] = 0.0
+        all_times, all_marks, all_states = model.batch_sample_points(
+            T=self.time_boundaries.max()+offset, #t+offset, 
+            left_window=offset, #last_t+offset, 
+            timestamps=times, 
+            marks=marks, 
+            mark_mask=1.0,#mark_mask,
+            num_samples=num_samples,
+            mask_dict=mask_dict,
+            adapt_dom_rate=True,
+        )
+
+        all_times, all_marks, all_states = batch_samples(all_times, all_marks, all_states, self.batch_size)
+        # last_t = t
+        return all_times, all_marks, all_states #times.squeeze(0), marks.squeeze(0)
+
+
+    # @torch.no_grad()
+    # def proposal_dist_sample(self, model, conditional_times=None, conditional_marks=None, offset=None):
+    #     last_t = 0.0
+    #     times, marks = conditional_times, conditional_marks
+    #     if offset is None:
+    #         if (conditional_times is None) or (conditional_times.numel() == 0):
+    #             offset = 0.0
+    #         else:
+    #             offset = conditional_times.max() #+1e-32
+        
+    #     for i,t in enumerate(self.time_boundaries):
+    #         mark_mask = torch.ones((model.num_channels,), dtype=torch.float32).to(self.device)
+    #         mark_mask[self.mark_restrictions[i]] = 0.0
+    #         times, marks = model.sample_points(
+    #             T=t+offset, 
+    #             left_window=last_t+offset, 
+    #             timestamps=times, 
+    #             marks=marks, 
+    #             mark_mask=mark_mask,
+    #         )
+    #         last_t = t
+    #     return times.squeeze(0), marks.squeeze(0)
 
     @torch.no_grad()
     def estimate(self, model, num_sample_seqs, num_int_samples, conditional_times=None, conditional_marks=None, calculate_bounds=False):
@@ -363,44 +472,56 @@ class TemporalMarkQuery(Query):
         if (conditional_times is None) or (conditional_times.numel() == 0):
             offset = 0.0
         else:
-            offset = conditional_times.max()#+1e-32
-        for _ in tqdm(range(num_sample_seqs), disable=not self.use_tqdm):
-            times, marks = self.proposal_dist_sample(model, conditional_times=conditional_times, conditional_marks=conditional_marks)
+            offset = conditional_times.max().item() #+1e-32
+        
+        # if self.batch_size > 1:
+        all_times, all_marks, all_states = self.proposal_dist_sample(model, conditional_times=conditional_times, conditional_marks=conditional_marks, num_samples=num_sample_seqs)
+        # else:
+            # all_seqs = [self.proposal_dist_sample(model, conditional_times=conditional_times, conditional_marks=conditional_marks) for _ in range(num_sample_seqs)]
+            # all_times, all_marks = zip(*all_seqs)
+
+        for times, marks, states in tqdm(zip(all_times, all_marks, all_states), disable=not self.use_tqdm):
+            # times, marks = self.proposal_dist_sample(model, conditional_times=conditional_times, conditional_marks=conditional_marks)
             total_int, lower_int, upper_int = 0.0, 0.0, 0.0
+            # print(conditional_times.shape, conditional_times.numel(), times.shape, marks.shape, states.shape)
+            
             for i in range(len(time_spans)):
                 if not self.restricted_positions[i]:
                     continue
 
                 if i == 0:
-                    a,b = 0.0, self.time_boundaries[0]
+                    a,b = 0.0, self.time_boundaries[0].item()
                 else:
-                    a,b = self.time_boundaries[i-1], self.time_boundaries[i]
+                    a,b = self.time_boundaries[i-1].item(), self.time_boundaries[i].item()
                 a = a + offset
                 b = b + offset
                 single_res = model.compensator(
                     a, 
                     b, 
-                    conditional_times=times.unsqueeze(0), 
-                    conditional_marks=marks.unsqueeze(0), 
+                    conditional_times=times, #.unsqueeze(0), 
+                    conditional_marks=marks, #.unsqueeze(0), 
+                    conditional_states=states,
                     num_int_pts=max(int(num_int_samples*time_spans[i]/time_norm), 2),  # At least two points are needed to integrate
-                    calculate_bounds=calculate_bounds,
+                    calculate_bounds=calculate_bounds,  # TODO: Use mask_dict here too to do a single compensator pass
                 )
 
                 if calculate_bounds:
-                    lower_int += single_res["lower_bound"].squeeze(0)[self.mark_restrictions[i]].sum()
-                    upper_int += single_res["upper_bound"].squeeze(0)[self.mark_restrictions[i]].sum()
-                total_int += single_res["integral"].squeeze(0)[self.mark_restrictions[i]].sum()
+                    lower_int += single_res["lower_bound"][:, self.mark_restrictions[i]].sum(dim=-1)
+                    upper_int += single_res["upper_bound"][:, self.mark_restrictions[i]].sum(dim=-1)
+                total_int += single_res["integral"][:, self.mark_restrictions[i]].sum(dim=-1)
                 
             ests.append(torch.exp(-total_int))
             if calculate_bounds:
-                est_lower_bound += torch.exp(-lower_int) / num_sample_seqs
-                est_upper_bound += torch.exp(-upper_int) / num_sample_seqs
+                est_lower_bound += torch.exp(-lower_int).sum(dim=0) / num_sample_seqs #(num_sample_seqs*lower_int.shape[0])
+                est_upper_bound += torch.exp(-upper_int).sum(dim=0) / num_sample_seqs #(num_sample_seqs*upper_int.shape[0])
 
-        est = sum(ests) / num_sample_seqs
+        ests = torch.cat(ests, dim=0)
+        assert(ests.numel() == num_sample_seqs)
+        est = ests.mean()  #.sum() / num_sample_seqs
         results = {
             "est": est,
             "naive_var": est - est**2,
-            "is_var": sum((e-est)**2 for e in ests) / num_sample_seqs,
+            "is_var": (est-ests).pow(2).mean(), #sum((e-est)**2 for e in ests) / num_sample_seqs,
         }
         results["rel_eff"] = results["naive_var"] / results["is_var"]
 
@@ -413,12 +534,14 @@ class TemporalMarkQuery(Query):
 
 class PositionalMarkQuery(Query):
 
-    def __init__(self, mark_restrictions, batch_size=128, device=torch.device('cpu'), use_tqdm=True):
+    def __init__(self, mark_restrictions, batch_size=256, device=torch.device('cpu'), use_tqdm=True):
         self.mark_restrictions = []    # list of list of restricted marks, if k is in one of these lists, then events with marks=k are not allowed in that respected time span
         for m in mark_restrictions:
             if isinstance(m, int):
                 self.mark_restrictions.append([m])
             else:
+                if isinstance(m, torch.Tensor):
+                    assert(len(m.shape) == 1)
                 self.mark_restrictions.append(m)
         self.max_events = len(mark_restrictions)
         self.restricted_positions = torch.BoolTensor([len(m) > 0 for m in self.mark_restrictions]).to(device)  # If true, then we will need to integrate for events in that position
@@ -434,59 +557,83 @@ class PositionalMarkQuery(Query):
 
         res = 0.0    # for a sample to count as 1 in the average, it must respect _every_ mark restriction
         indices = torch.arange(0, self.max_events).to(self.device)
-        for _ in tqdm(range(num_sample_seq), disable=not self.use_tqdm): 
-            times, marks = model.sample_points(
-                left_window=0 if conditional_times is None else conditional_times.max(), 
-                length_limit=self.max_events + (0 if conditional_times is None else conditional_times.numel()), 
-                timestamps=conditional_times, 
-                marks=conditional_marks, 
-                mark_mask=1.0,
-            )
-
-            times, marks = times.squeeze(0), marks.squeeze(0)
+        _, all_marks, _ = model.batch_sample_points(
+            left_window=0 if conditional_times is None else conditional_times.max(), 
+            length_limit=self.max_events + (0 if conditional_times is None else conditional_times.numel()), 
+            timestamps=conditional_times, 
+            marks=conditional_marks, 
+            mark_mask=1.0,
+            num_samples=num_sample_seq,
+        )
+        all_marks = flatten([marks.unbind(dim=0) for marks in all_marks])
+        for marks in tqdm(all_marks, disable=not self.use_tqdm): 
             marks = marks[(0 if conditional_marks is None else conditional_marks.numel()):]  # only take the sampled marks, not the conditional ones
             if mark_res_array[indices, marks].sum() == 0:
                 res += 1. / num_sample_seq
         return res
 
     @torch.no_grad()
-    def proposal_dist_sample(self, model, conditional_times=None, conditional_marks=None):
-        times, marks = conditional_times, conditional_marks
-        for i in range(self.max_events):
-            mark_mask = torch.ones((model.num_channels,), dtype=torch.float32).to(self.device)
-            mark_mask[self.mark_restrictions[i]] = 0.0
+    def proposal_dist_sample(self, model, conditional_times=None, conditional_marks=None, num_samples=1):
+        cond_len = 0 if conditional_times is None else conditional_times.numel()
+        mark_mask = torch.ones((self.max_events+1+cond_len, model.num_channels,), dtype=torch.float32).to(self.device)  # +1 to have an unrestricted final mask
+        for i in range(cond_len, self.max_events+cond_len):
+            mark_mask[i, self.mark_restrictions[i-cond_len]] = 0.0
+        mask_dict = {
+            "positional_mark_restrictions": mark_mask,
+        }
 
-            times, marks = model.sample_points(
-                left_window=times[..., -1].item() if i > 0 else (0.0 if conditional_times is None else conditional_times.max()+1e-32), 
-                length_limit=i+1 + (0 if conditional_times is None else conditional_times.numel()), 
-                timestamps=times, 
-                marks=marks, 
-                mark_mask=mark_mask,
-            )
-        return times.squeeze(0), marks.squeeze(0)
+        all_times, all_marks, all_states = model.batch_sample_points(
+            left_window=0.0 if conditional_times is None else conditional_times.max(), 
+            length_limit=self.max_events + (0 if conditional_times is None else conditional_times.numel()), 
+            timestamps=conditional_times, 
+            marks=conditional_marks, 
+            mark_mask=1.0,
+            num_samples=num_samples,
+            mask_dict=mask_dict,
+        )
+
+        all_times, all_marks, all_states = batch_samples(all_times, all_marks, all_states, self.batch_size)
+
+        return all_times, all_marks, all_states
+
+    # @torch.no_grad()
+    # def proposal_dist_sample(self, model, conditional_times=None, conditional_marks=None, num_samples=1):
+    #     times, marks = conditional_times, conditional_marks
+    #     for i in range(self.max_events):
+    #         mark_mask = torch.ones((model.num_channels,), dtype=torch.float32).to(self.device)
+    #         mark_mask[self.mark_restrictions[i]] = 0.0
+
+    #         times, marks = model.sample_points(
+    #             left_window=times[..., -1].item() if i > 0 else (0.0 if conditional_times is None else conditional_times.max()+1e-32), 
+    #             length_limit=i+1 + (0 if conditional_times is None else conditional_times.numel()), 
+    #             timestamps=times, 
+    #             marks=marks, 
+    #             mark_mask=mark_mask,
+    #         )
+    #     return times.squeeze(0), marks.squeeze(0)
 
     @torch.no_grad()
     def estimate(self, model, num_sample_seqs, num_int_samples, conditional_times=None, conditional_marks=None, calculate_bounds=False):
         est_lower_bound, est_upper_bound = 0.0, 0.0
         ests = []
-        for _ in tqdm(range(num_sample_seqs), disable=not self.use_tqdm):
-            times, marks = self.proposal_dist_sample(model, conditional_times=conditional_times, conditional_marks=conditional_marks)
-            time_spans = times[(0 if conditional_times is None else conditional_times.numel()):] - F.pad(times[(0 if conditional_times is None else conditional_times.numel()):-1].unsqueeze(0), (1,0), 'constant', 0.0).squeeze(0) # equivalent to: np.ediff1d(times, to_begin=times[0])
-            time_norm = time_spans[self.restricted_positions].sum()    # Used to scale how many integration sample points each interval uses
-
+        all_times, all_marks, all_states = self.proposal_dist_sample(model, conditional_times=conditional_times, conditional_marks=conditional_marks, num_samples=num_sample_seqs)
+        num_integrable_spans = self.restricted_positions.sum().item()
+        for times, marks, states in tqdm(zip(all_times, all_marks, all_states), disable=not self.use_tqdm):
+            #time_spans = times[:, (0 if conditional_times is None else conditional_times.shape[-1]):] - F.pad(times[:, (0 if conditional_times is None else conditional_times.shape[-1]):-1], (1,0), 'constant', 0.0) # equivalent to: np.ediff1d(times, to_begin=times[0])
+            #time_norm = time_spans[:, self.restricted_positions].sum(dim=-1)    # Used to scale how many integration sample points each interval uses
             lower_int, upper_int = 0.0, 0.0
             total_int = 0.0
-            for i in range(len(times)-(0 if conditional_times is None else conditional_times.numel())):
+            for i in range(times.shape[-1]-(0 if conditional_times is None else conditional_times.shape[-1])):
                 if not self.restricted_positions[i]:
                     continue
 
                 if conditional_times is None:
                     if i == 0:
-                        a,b = 0.0, times[0]
+                        a,b = torch.zeros_like(times[:, 0]), times[:, 0]
                     else:
-                        a,b = times[i-1], times[i]
+                        a,b = times[:, i-1], times[:, i]
                 else:
-                    a,b = times[i-1+conditional_times.numel()], times[i+conditional_times.numel()]
+                    a,b = times[:, i-1+conditional_times.shape[-1]], times[:, i+conditional_times.shape[-1]]
 
                 # if conditional_times is not None:  # Make the last event in the conditional_times effectively 0
                 #     a += conditional_times.max()+1e-32
@@ -495,26 +642,29 @@ class PositionalMarkQuery(Query):
                 single_res = model.compensator(
                     a, 
                     b, 
-                    conditional_times=times.unsqueeze(0), 
-                    conditional_marks=marks.unsqueeze(0), 
-                    num_int_pts=max(int(num_int_samples*time_spans[i]/time_norm), 2),  # at least two points are needed to integrate
+                    conditional_times=times,#.unsqueeze(0), 
+                    conditional_marks=marks,#.unsqueeze(0), 
+                    num_int_pts=max(int(num_int_samples/num_integrable_spans), 2), #(num_int_samples*time_spans[:, i]/time_norm).long().clamp(min=2),  # at least two points are needed to integrate
+                    conditional_states=states,
                     calculate_bounds=calculate_bounds,
                 )
                 if calculate_bounds:
-                    lower_int += single_res["lower_bound"].squeeze(0)[self.mark_restrictions[i]].sum()
-                    upper_int += single_res["upper_bound"].squeeze(0)[self.mark_restrictions[i]].sum()
-                total_int += single_res["integral"].squeeze(0)[self.mark_restrictions[i]].sum()
+                    lower_int += single_res["lower_bound"][:, self.mark_restrictions[i]].sum(dim=-1)
+                    upper_int += single_res["upper_bound"][:, self.mark_restrictions[i]].sum(dim=-1)
+                total_int += single_res["integral"][:, self.mark_restrictions[i]].sum(dim=-1)
                 
             ests.append(torch.exp(-total_int))
             if calculate_bounds:
-                est_lower_bound += torch.exp(-lower_int) / num_sample_seqs
-                est_upper_bound += torch.exp(-upper_int) / num_sample_seqs
+                est_lower_bound += torch.exp(-lower_int).sum(dim=0) / num_sample_seqs #(num_sample_seqs*lower_int.shape[0])
+                est_upper_bound += torch.exp(-upper_int).sum(dim=0) / num_sample_seqs #(num_sample_seqs*upper_int.shape[0])
 
-        est = sum(ests) / num_sample_seqs
+        ests = torch.cat(ests, dim=0)
+        assert(ests.numel() == num_sample_seqs)
+        est = ests.mean()  #sum(ests) / num_sample_seqs
         results = {
             "est": est,
             "naive_var": est - est**2,
-            "is_var": sum((e-est)**2 for e in ests) / num_sample_seqs,
+            "is_var": (est - ests).pow(2).mean(), #sum((e-est)**2 for e in ests) / num_sample_seqs,
         }
         results["rel_eff"] = results["naive_var"] / results["is_var"]
 
@@ -527,7 +677,7 @@ class PositionalMarkQuery(Query):
 
 class UnbiasedHittingTimeQuery(TemporalMarkQuery):
 
-    def __init__(self, up_to, hitting_marks, batch_size=128, device=torch.device('cpu'), use_tqdm=True):
+    def __init__(self, up_to, hitting_marks, batch_size=256, device=torch.device('cpu'), use_tqdm=True):
         assert(isinstance(up_to, (float, int)) and up_to > 0)
         assert(isinstance(hitting_marks, (int, list)))
         super().__init__(
@@ -559,9 +709,9 @@ class UnbiasedHittingTimeQuery(TemporalMarkQuery):
 
 class MarginalMarkQuery(PositionalMarkQuery):
 
-    def __init__(self, n, marks_of_interest, total_marks, batch_size=128, device=torch.device('cpu'), use_tqdm=True):
+    def __init__(self, n, marks_of_interest, total_marks, batch_size=256, device=torch.device('cpu'), use_tqdm=True):
         assert(isinstance(n, int) and n > 0)
-        assert(isinstance(marks_of_interest, (int, list)))
+        assert(isinstance(marks_of_interest, (int, list, torch.Tensor)))
         if isinstance(marks_of_interest, int):
             marks_of_interest = [marks_of_interest]
         super().__init__(

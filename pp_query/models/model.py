@@ -1,3 +1,4 @@
+from ast import Assert
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -13,6 +14,8 @@ NORMS = (
     nn.InstanceNorm3d,
     nn.LocalResponseNorm,
 )
+
+MAX_SAMPLE_BATCH_SIZE = 1024
 
 def top_k_top_p_filtering(logits, top_k=0, top_p=0.0, filter_value=-float('Inf')):
     """ Filter a distribution of logits using top-k and/or nucleus (top-p) filtering
@@ -53,7 +56,7 @@ class PPModel(nn.Module):
         self, 
         decoder, 
         num_channels,
-        dominating_rate=1000.,
+        dominating_rate=10000.,
     ):
         """Constructor for general PPModel class.
         
@@ -207,7 +210,7 @@ class PPModel(nn.Module):
                 "batch_log_likelihood": positive_samples.sum(dim=-1) - (window * negative_samples.mean(dim=-1)),
             }
 
-        
+
     def sample_points(self, marks, timestamps, dominating_rate=None, T=float('inf'), left_window=0.0, length_limit=float('inf'), mark_mask=1.0, top_k=0, top_p=0.0, proposal_batch_size=1024):
         assert((T < float('inf')) or (length_limit < float('inf')))
         if dominating_rate is None:
@@ -216,7 +219,8 @@ class PPModel(nn.Module):
             marks = torch.LongTensor([[]], device=next(self.parameters()).device)
             timestamps = torch.FloatTensor([[]], device=next(self.parameters()).device)
 
-        proposal_batch_size = max(min(proposal_batch_size, int(dominating_rate*(T-left_window)*5)), 10)  # dominating_rate*(T-left_window) is the expected number of proposal times to draw from [left_window, T]
+        if T < float('inf'):
+            proposal_batch_size = max(min(proposal_batch_size, int(dominating_rate*(T-left_window)*5)), 10)  # dominating_rate*(T-left_window) is the expected number of proposal times to draw from [left_window, T]
 
         state = self.forward(marks, timestamps)
         state_values, state_times = state["state_dict"]["state_values"], state["state_dict"]["state_times"]
@@ -287,6 +291,211 @@ class PPModel(nn.Module):
             #     torch.cat((timestamps, torch.FloatTensor([sampled_times])), dim=-1), 
             #     torch.cat((marks, torch.LongTensor([sampled_marks])), dim=-1),
             # )
+        
+    def determine_mark_mask(self, new_times, sample_lens, mask_dict):
+        if "temporal_mark_restrictions" in mask_dict:
+            mark_masks = mask_dict["temporal_mark_restrictions"]  # (num_boundaries, num_channels)
+            time_boundaries = mask_dict["time_boundaries"]  # (num_boundaries,)
+            idx = (new_times.unsqueeze(-1) >= time_boundaries.unsqueeze(-2)).sum(dim=-1)
+        elif "positional_mark_restrictions" in mask_dict:
+            mark_masks = mask_dict["positional_mark_restrictions"]  # (num_positions, num_channels)
+            idx = sample_lens.unsqueeze(-1).expand(*new_times.shape)
+        else:
+            raise NotImplementedError
+
+        return F.embedding(idx, mark_masks)
+
+    def batch_sample_points(
+        self, 
+        marks, 
+        timestamps, 
+        dominating_rate=None, 
+        T=float('inf'), 
+        left_window=0.0, 
+        length_limit=float('inf'), 
+        mark_mask=1.0,  #TODO: Make default value None instead of 1.0
+        top_k=0, 
+        top_p=0.0, 
+        num_samples=1, 
+        proposal_batch_size=1024, 
+        mask_dict=None, 
+        adapt_dom_rate=True,
+        dyn_dom_buffer=25,#100,
+    ):
+        if num_samples > MAX_SAMPLE_BATCH_SIZE:  # Split into batches
+            resulting_times, resulting_marks, resulting_states = [], [], []
+            remaining_samples = num_samples
+            while remaining_samples > 0:
+                current_batch_size = min(remaining_samples, MAX_SAMPLE_BATCH_SIZE)
+                sampled_times, sampled_marks, sampled_states = self.batch_sample_points(
+                    marks=marks, 
+                    timestamps=timestamps, 
+                    dominating_rate=dominating_rate, 
+                    T=T, 
+                    left_window=left_window, 
+                    length_limit=length_limit, 
+                    mark_mask=mark_mask,  #TODO: Make default value None instead of 1.0
+                    top_k=top_k, 
+                    top_p=top_p, 
+                    num_samples=current_batch_size, 
+                    proposal_batch_size=proposal_batch_size, 
+                    mask_dict=mask_dict, 
+                    adapt_dom_rate=adapt_dom_rate,
+                    dyn_dom_buffer=dyn_dom_buffer,
+                )
+                remaining_samples -= current_batch_size
+                resulting_times.extend(sampled_times)
+                resulting_marks.extend(sampled_marks)
+                resulting_states.extend(sampled_states)
+            return resulting_times, resulting_marks, resulting_states
+        
+        assert((T < float('inf')) or (length_limit < float('inf')))
+        if mask_dict is None:
+            mask_dict = {}
+        if dominating_rate is None:
+            dominating_rate = self.dominating_rate
+        if marks is None:
+            marks = torch.LongTensor([[]], device=next(self.parameters()).device)
+            timestamps = torch.FloatTensor([[]], device=next(self.parameters()).device)
+        if isinstance(left_window, torch.Tensor):
+            left_window = left_window.item()
+        if isinstance(T, torch.Tensor):
+            T = T.item()
+        if length_limit == float('inf'):
+            length_limit = torch.iinfo(torch.int64).max  # Maximum Long value
+
+        sample_lens = torch.zeros((num_samples,), dtype=torch.int64).to(next(self.parameters()).device) + timestamps.numel()
+        marks, timestamps = marks.expand(num_samples, *marks.shape[1:]), timestamps.expand(num_samples, *timestamps.shape[1:])
+        time_pad, mark_pad = torch.nan_to_num(torch.tensor(float('inf'), dtype=timestamps.dtype)).item(), 0
+        state = self.forward(marks, timestamps)
+        state_values, state_times = state["state_dict"]["state_values"], state["state_dict"]["state_times"]
+        batch_idx = torch.arange(num_samples).to(state_values.device)
+
+        dist = torch.distributions.Exponential(dominating_rate)
+        dist.rate = dist.rate.to(state_values.device)*0+1  # We will manually apply the scale to samples
+        dominating_rate = torch.ones((num_samples,1), dtype=torch.float32).to(state_values.device)*dominating_rate
+        last_time = left_window 
+        #new_time = last_time + dist.sample(sample_shape=torch.Size((1,1))).to(state_values.device)
+        new_times = last_time + dist.sample(sample_shape=torch.Size((num_samples, proposal_batch_size))).cumsum(dim=-1)/dominating_rate
+
+        calculate_mark_mask = isinstance(mark_mask, float) and (("temporal_mark_restrictions" in mask_dict) or ("positional_mark_restrictions" in mask_dict))
+        resulting_times, resulting_marks, resulting_states = [], [], []
+
+        if adapt_dom_rate:
+            dynamic_dom_rates = torch.ones((num_samples, dyn_dom_buffer,)).to(state_values.device)*dominating_rate
+            k = 0
+        j = -1
+        while (new_times <= T).any() and (sample_lens < length_limit).any():
+            j += 1
+            within_range_mask = (new_times <= T) & (sample_lens < length_limit).unsqueeze(-1)
+            to_stay = within_range_mask.any(dim=-1)
+            to_go = ~to_stay
+            if to_go.any():
+                leaving_times, leaving_marks, leaving_states = timestamps[to_go, ...], marks[to_go, ...], state_values[to_go, ...]
+                resulting_times.append(leaving_times)
+                resulting_marks.append(leaving_marks)
+                resulting_states.append(leaving_states)
+                # for i,l in enumerate(sample_lens[to_go]):
+                #     resulting_times.append(leaving_times[i, :l])
+                #     resulting_marks.append(leaving_marks[i, :l])
+                new_times = new_times[to_stay, ...]
+                sample_lens = sample_lens[to_stay]
+                timestamps = timestamps[to_stay, ...]
+                marks = marks[to_stay, ...]
+                state_values = state_values[to_stay, ...]
+                state_times = state_times[to_stay, ...]
+                batch_idx = batch_idx[:timestamps.shape[0]]
+                dominating_rate = dominating_rate[to_stay, ...]
+                if adapt_dom_rate:
+                    dynamic_dom_rates = dynamic_dom_rates[to_stay, ...]
+
+            if calculate_mark_mask:
+                mark_mask = self.determine_mark_mask(new_times, sample_lens, mask_dict)
+
+            within_range_mask = (new_times <= T) & (sample_lens < length_limit).unsqueeze(-1)
+
+            # print(dist.rate, new_times.min(), sample_lens.min(), new_times.shape[0])
+
+            sample_intensities = self.get_intensity(
+                state_values=state_values,
+                state_times=state_times,
+                timestamps=new_times,
+                marks=None,
+                mark_mask=mark_mask,
+            )
+            # print(j, new_times.min(), T, sample_lens.min(), length_limit, sample_lens.shape, dist.rate, sample_intensities["total_intensity"].mean())
+            acceptances = torch.rand_like(new_times) <= (sample_intensities["total_intensity"] / dominating_rate)  #dominating_rate)
+            acceptances = acceptances & within_range_mask  # Don't accept any sampled events outside the window
+            samples_w_new_events = acceptances.any(dim=-1)
+            if samples_w_new_events.any():
+                event_idx = acceptances.int().argmax(dim=-1)
+                new_time = new_times[batch_idx, event_idx].unsqueeze(-1)
+
+                if top_k > 0 or top_p > 0:
+                    logits = top_k_top_p_filtering(sample_intensities["all_log_mark_intensities"][batch_idx, event_idx, :].unsqueeze(-2), top_k=top_k, top_p=top_p)
+                else:
+                    logits = sample_intensities["all_log_mark_intensities"][batch_idx, event_idx, :].unsqueeze(-2)
+                mark_probs = F.softmax(logits, -1)
+                mark_dist = torch.distributions.Categorical(mark_probs)
+                new_mark = mark_dist.sample()
+
+                # Need to store sampled events into timestamps and marks
+                # Some need to be appended, some need to overwrite previously written padded values
+                to_append = (samples_w_new_events & (sample_lens == timestamps.shape[-1])).unsqueeze(-1)
+                to_pad = ~to_append
+                if to_append.any():
+                    timestamps = torch.cat((timestamps, torch.where(to_append, new_time, time_pad)), -1)  #new_time*to_append + time_pad*to_pad), -1)
+                    marks = torch.cat((marks, torch.where(to_append, new_mark, mark_pad)), -1)  #new_mark*to_append + mark_pad*to_pad), -1)
+
+                to_overwrite = samples_w_new_events & (sample_lens < timestamps.shape[-1])
+                if to_overwrite.any():
+                    timestamps[to_overwrite, sample_lens[to_overwrite]] = new_time.squeeze(-1)[to_overwrite]
+                    marks[to_overwrite, sample_lens[to_overwrite]] = new_mark.squeeze(-1)[to_overwrite]
+
+                sample_lens[samples_w_new_events] += 1  # Guaranteed at least one event was either appended or overwritten
+                state = self.forward(marks, timestamps)
+                state_values, state_times = state["state_dict"]["state_values"], state["state_dict"]["state_times"]
+                last_time = torch.where(samples_w_new_events.unsqueeze(-1), new_time, torch.max(new_times, dim=-1, keepdim=True).values)  #new_time*samples_w_new_events.unsqueeze(-1) + (torch.max(new_times, dim=-1).values*(~samples_w_new_events)).unsqueeze(-1)
+            else:
+                last_time = torch.max(new_times, dim=-1, keepdim=True).values
+
+            if adapt_dom_rate:        
+                dynamic_dom_rates[:, k] = sample_intensities["total_intensity"].max(dim=1).values*100
+                k = (k+1) % dynamic_dom_rates.shape[1]
+                dominating_rate = torch.max(dynamic_dom_rates, dim=1, keepdim=True).values
+
+            new_times = last_time + dist.sample(sample_shape=(last_time.shape[0], proposal_batch_size)).cumsum(dim=-1)/dominating_rate
+
+        #for i,l in enumerate(sample_lens):
+        resulting_times.append(timestamps)  #timestamps[i, :l])
+        resulting_marks.append(marks)       #marks[i, :l])
+        resulting_states.append(state_values)
+
+        assumption_violation = False
+        for _ in range(5):
+            if adapt_dom_rate:
+                break
+            eval_times = torch.rand_like(timestamps).clamp(min=1e-8)*T
+            sample_intensities = self.get_intensity(
+                state_values=state_values,
+                state_times=state_times,
+                timestamps=eval_times,
+                marks=None,
+            )
+            if (sample_intensities["total_intensity"] > dominating_rate).any().item():
+                print("DR: {}".format(dominating_rate))
+                print("IN: {}".format(sample_intensities["total_intensity"].max().item()))
+                assumption_violation = True
+                break
+
+        if assumption_violation:
+            print("Violation in sampling assumption occurred. Redoing sample.")
+            return None # self.sample_points(ref_marks, ref_timestamps, ref_marks_bwd, ref_timestamps_bwd, tgt_marks, tgt_timestamps, context_lengths, dominating_rate * 2, T)
+        else:
+            return resulting_times, resulting_marks, resulting_states #(timestamps, marks)
+            #     torch.cat((timestamps, torch.FloatTensor([sampled_times])), dim=-1), 
+            #     torch.cat((marks, torch.LongTensor([sampled_marks])), dim=-1),
+            # )
 
     def get_param_groups(self):
         """Returns iterable of dictionaries specifying parameter groups.
@@ -316,19 +525,47 @@ class PPModel(nn.Module):
 
         return weight_decay_params, no_weight_decay_params
 
-    def compensator(self, a, b, conditional_times, conditional_marks, num_int_pts=100, calculate_bounds=False):
-        assert(a < b)
+    def compensator(self, a, b, conditional_times, conditional_marks, conditional_states=None, num_int_pts=100, calculate_bounds=False):
+        scalar_bounds = (isinstance(a, (float, int)) and isinstance(b, (float, int))) or ((len(a.shape) == 0) and (len(b.shape) == 0))
+        if scalar_bounds:
+            assert(a <= b)
+        else:
+            assert((a <= b).all())
+
         results = {}
-        state_dict = self.get_states(conditional_marks, conditional_times)
-        ts = torch.linspace(a, b, num_int_pts).to(next(self.parameters()).device)
-        vals = self.get_intensity(
-            state_values=state_dict["state_values"], 
-            state_times=state_dict["state_times"], 
-            timestamps=ts.expand(*conditional_times.shape[:-1], -1), 
-            marks=None,
-        )["all_log_mark_intensities"].exp()
+        if conditional_states is None:
+            state_dict = self.get_states(conditional_marks, conditional_times)
+            conditional_states = state_dict["state_values"]
+        if scalar_bounds:
+            ts = torch.linspace(a, b, num_int_pts).to(next(self.parameters()).device)
+            vals = self.get_intensity(
+                state_values=conditional_states, #state_dict["state_values"], 
+                state_times=conditional_times, #state_dict["state_times"], 
+                timestamps=ts.expand(*conditional_times.shape[:-1], -1), 
+                marks=None,
+            )["all_log_mark_intensities"].exp()
+        else:
+            if len(a.shape) == 0:
+                a = a.unsqueeze(0).expand(conditional_times.shape[0])
+            if len(b.shape) == 0:
+                b = b.unsqueeze(0).expand(conditional_times.shape[0])
+
+            ts = torch.linspace(0, 1, num_int_pts).unsqueeze(0).to(next(self.parameters()).device)
+            ts = a.unsqueeze(-1) + ts*(b-a).unsqueeze(-1)
+
+            vals = self.get_intensity(
+                state_values=conditional_states, #state_dict["state_values"], 
+                state_times=conditional_times, #state_dict["state_times"], 
+                timestamps=ts,#.expand(*conditional_times.shape[:-1], -1), 
+                marks=None,
+            )["all_log_mark_intensities"].exp()
+            ts = ts.unsqueeze(-1)
+            #raise NotImplementedError
+
         if calculate_bounds:
             delta = (b-a)/(num_int_pts-1)
+            if not scalar_bounds:
+                delta = delta.unsqueeze(-1)
             left_pts, right_pts = vals[..., :-1, :], vals[..., 1:, :]
             upper_lower_pts = torch.stack((left_pts, right_pts), dim=-1)
             upper_vals, lower_vals = upper_lower_pts.max(dim=-1).values, upper_lower_pts.min(dim=-1).values
@@ -338,23 +575,25 @@ class PPModel(nn.Module):
         else:
         #    vals[..., 0, :], vals[..., -1, :] = 0.5*vals[..., 0, :], 0.5*vals[..., -1, :]
         #    results["integral"] = torch.trapezoid(vals, dx=delta, dim=-2)#delta * vals.sum(dim=-2)
-            results["integral"] = torch.trapezoid(vals, x=torch.linspace(a, b, num_int_pts), dim=-2)#delta * vals.sum(dim=-2)
-        if calculate_bounds:
-            assert(results["lower_bound"].sum().item() <= results["integral"].sum().item() <= results["upper_bound"].sum().item())
+            results["integral"] = torch.trapezoid(vals, x=ts, dim=-2)#delta * vals.sum(dim=-2)
+        # if calculate_bounds:
+        #     assert(results["lower_bound"].sum().item() <= results["integral"].sum().item() <= results["upper_bound"].sum().item())
 
         return results
 
-    def compensator_grid(self, a, b, conditional_times, conditional_marks, num_int_pts, *args, **kwargs):
+    def compensator_grid(self, a, b, conditional_times, conditional_marks, num_int_pts, conditional_states=None, *args, **kwargs):
         if conditional_times is None:
             conditional_times, conditional_marks = torch.FloatTensor([[]]).to(next(self.parameters()).device), torch.LongTensor([[]]).to(next(self.parameters()).device)
 
-        state_dict = self.get_states(conditional_marks, conditional_times)
+        if conditional_states is None:
+            state_dict = self.get_states(conditional_marks, conditional_times)
+            conditional_states = state_dict["state_values"]
         num_int_pts += 1  # increment as we use n+1 samples to generate n integral results
         comps = torch.zeros((*conditional_times.shape[:-1], num_int_pts, self.num_channels), dtype=torch.float32).to(conditional_times.device)
         ts = torch.linspace(a, b, num_int_pts).expand(*conditional_times.shape[:-1], -1).to(conditional_times.device)
         intensities = self.get_intensity(
-            state_values=state_dict["state_values"],
-            state_times=state_dict["state_times"],
+            state_values=conditional_states, #state_dict["state_values"],
+            state_times=conditional_times, #state_dict["state_times"],
             timestamps=ts, 
             marks=None,
         )['all_log_mark_intensities'].exp()

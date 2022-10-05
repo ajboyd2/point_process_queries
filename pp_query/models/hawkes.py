@@ -80,7 +80,10 @@ class HawkesModel(PPModel):
             all_mark_intensities = s * torch.log(1 + torch.exp(all_mark_intensities / s))
 
         if isinstance(mark_mask, torch.FloatTensor):
-            all_mark_intensities *= mark_mask.view(*((1,)*(len(all_mark_intensities.shape)-1)), -1)
+            if len(mark_mask.shape) == 1:
+                mark_mask = mark_mask.view(*((1,)*(len(all_mark_intensities.shape)-1)), -1)
+            all_mark_intensities *= mark_mask
+
         all_log_mark_intensities = all_mark_intensities.log()
         total_intensity = all_mark_intensities.sum(-1)
 

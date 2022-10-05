@@ -64,11 +64,13 @@ def evaluation_args(parser):
     group.add_argument("--calculate_is_bounds", action="store_true", help="Calculate upper and lower integration 'bounds' using Reimannian integration for Importance Sampling estimate.")
     group.add_argument("--hitting_time_queries", action="store_true", help="Perform hitting time queries.")
     group.add_argument("--marginal_mark_queries", action="store_true", help="Perform marginal mark queries.")
+    group.add_argument("--marg_query_n", type=int, default=3, help="Evaluate marginal mark queries at `marg_query_n` steps ahead.")
     group.add_argument("--a_before_b_queries", action="store_true", help="Perform a before b queries.")
-    group.add_argument("--num_queries", type=int, default=30, help="Number of queries to be conducted in experiments.")
-    group.add_argument("--gt_num_seqs", type=int, default=1000, help="Number of sequences to use when estimating 'ground truth'.")
+    group.add_argument("--just_gt", action="store_true", help="Perform only ground truth evaluation of queries.")
+    group.add_argument("--num_queries", type=int, default=1000, help="Number of queries to be conducted in experiments.")
+    group.add_argument("--gt_num_seqs", type=int, default=5000, help="Number of sequences to use when estimating 'ground truth'.")
     group.add_argument("--gt_num_int_pts", type=int, default=1000, help="Number of integration points to use when estimating 'ground truth'.")
-    group.add_argument("--num_seqs", nargs="+", type=int, default=[2, 4, 8, 16, 64, 256], help="List of number of sequences to use when performing estimates.")
+    group.add_argument("--num_seqs", nargs="+", type=int, default=[1000, 250, 50, 20, 10, 4, 2], help="List of number of sequences to use when performing estimates.")
     group.add_argument("--num_int_pts", nargs="+", type=int, default=[1000], help="List of number of integration points to use when performing estimates.")
     #group.add_argument("--", type=, default=, help="")pin_test_memory
 

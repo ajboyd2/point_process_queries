@@ -153,6 +153,7 @@ class PointPatternDataset(Dataset):
                 for line in f:
                     instances.append(json.loads(line))
         else:
+            print(file_path)
             raise NotImplementedError
             # with open(file_path, 'r') as f:
             #     instances = []
@@ -172,7 +173,6 @@ class PointPatternDataset(Dataset):
             instance["marks"] = [instance["marks"][j] for j in keep_idx]
 
         instances = [instance for instance in instances if len(instance["times"]) > 0]
-
         vocab_size = max(max(instance["marks"]) for instance in instances) + 1
 
         if self.keep_pct < 1:

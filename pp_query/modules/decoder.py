@@ -298,7 +298,9 @@ class HawkesDecoder(nn.Module):
 
         intensity_values = F.softplus(self.hidden_to_intensity_logits(h_t))
         if isinstance(mark_mask, torch.FloatTensor):
-            intensity_values *= mark_mask.view(*((1,)*(len(intensity_values.shape)-1)), -1)
+            if len(mark_mask.shape) == 1:
+                mark_mask = mark_mask.view(*((1,)*(len(intensity_values.shape)-1)), -1)
+            intensity_values *= mark_mask
 
         all_log_mark_intensities = torch.log(intensity_values + 1e-12)
         total_intensity = intensity_values.sum(dim=-1)
