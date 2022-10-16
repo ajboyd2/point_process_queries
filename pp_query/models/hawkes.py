@@ -90,6 +90,7 @@ class HawkesModel(PPModel):
         intensity_dict = {
             "all_log_mark_intensities": all_log_mark_intensities,
             "total_intensity": total_intensity,
+            "all_mark_intensities": all_mark_intensities,
         }
 
         if marks is not None:

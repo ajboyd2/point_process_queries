@@ -1,4 +1,5 @@
 from ast import Assert
+from numpy import empty
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -57,6 +58,7 @@ class PPModel(nn.Module):
         decoder, 
         num_channels,
         dominating_rate=10000.,
+        dyn_dom_buffer=4,
     ):
         """Constructor for general PPModel class.
         
@@ -73,13 +75,15 @@ class PPModel(nn.Module):
         self.decoder = decoder
         self.num_channels = num_channels
         self.dominating_rate = dominating_rate
+        self.dyn_dom_buffer = dyn_dom_buffer
 
-    def get_states(self, marks, timestamps):
+    def get_states(self, marks, timestamps, old_states=None):
         """Get the hidden states that can be used to extract intensity values from."""
         
         states = self.decoder.get_states(
             marks=marks, 
             timestamps=timestamps, 
+            old_states=old_states,
         )
 
         return {
@@ -320,8 +324,9 @@ class PPModel(nn.Module):
         proposal_batch_size=1024, 
         mask_dict=None, 
         adapt_dom_rate=True,
-        dyn_dom_buffer=25,#100,
+        stop_marks=None,
     ):
+        dyn_dom_buffer = self.dyn_dom_buffer
         if num_samples > MAX_SAMPLE_BATCH_SIZE:  # Split into batches
             resulting_times, resulting_marks, resulting_states = [], [], []
             remaining_samples = num_samples
@@ -341,7 +346,7 @@ class PPModel(nn.Module):
                     proposal_batch_size=proposal_batch_size, 
                     mask_dict=mask_dict, 
                     adapt_dom_rate=adapt_dom_rate,
-                    dyn_dom_buffer=dyn_dom_buffer,
+                    stop_marks=stop_marks,
                 )
                 remaining_samples -= current_batch_size
                 resulting_times.extend(sampled_times)
@@ -349,7 +354,8 @@ class PPModel(nn.Module):
                 resulting_states.extend(sampled_states)
             return resulting_times, resulting_marks, resulting_states
         
-        assert((T < float('inf')) or (length_limit < float('inf')))
+        stop_for_marks = stop_marks is not None
+        assert((T < float('inf')) or (length_limit < float('inf')) or stop_for_marks)
         if mask_dict is None:
             mask_dict = {}
         if dominating_rate is None:
@@ -370,13 +376,16 @@ class PPModel(nn.Module):
         state = self.forward(marks, timestamps)
         state_values, state_times = state["state_dict"]["state_values"], state["state_dict"]["state_times"]
         batch_idx = torch.arange(num_samples).to(state_values.device)
+        finer_proposal_batch_size = max(proposal_batch_size // 4, 16)
 
         dist = torch.distributions.Exponential(dominating_rate)
         dist.rate = dist.rate.to(state_values.device)*0+1  # We will manually apply the scale to samples
         dominating_rate = torch.ones((num_samples,1), dtype=torch.float32).to(state_values.device)*dominating_rate
-        last_time = left_window 
+        last_time = torch.ones_like(dominating_rate) * left_window if isinstance(left_window, (int, float)) else left_window
         #new_time = last_time + dist.sample(sample_shape=torch.Size((1,1))).to(state_values.device)
         new_times = last_time + dist.sample(sample_shape=torch.Size((num_samples, proposal_batch_size))).cumsum(dim=-1)/dominating_rate
+        stop_marks = stop_marks if stop_for_marks else torch.tensor([], dtype=torch.long).to(state_values.device)
+        sample_hasnt_hit_stop_marks = torch.ones((num_samples,), dtype=torch.bool).to(state_values.device)
 
         calculate_mark_mask = isinstance(mark_mask, float) and (("temporal_mark_restrictions" in mask_dict) or ("positional_mark_restrictions" in mask_dict))
         resulting_times, resulting_marks, resulting_states = [], [], []
@@ -387,11 +396,14 @@ class PPModel(nn.Module):
         j = -1
         while (new_times <= T).any() and (sample_lens < length_limit).any():
             j += 1
-            within_range_mask = (new_times <= T) & (sample_lens < length_limit).unsqueeze(-1)
+            within_range_mask = (new_times <= T) & (sample_lens < length_limit).unsqueeze(-1) & sample_hasnt_hit_stop_marks.unsqueeze(-1)
             to_stay = within_range_mask.any(dim=-1)
             to_go = ~to_stay
             if to_go.any():
-                leaving_times, leaving_marks, leaving_states = timestamps[to_go, ...], marks[to_go, ...], state_values[to_go, ...]
+                if stop_for_marks:
+                    leaving_times, leaving_marks, leaving_states = timestamps[to_go, sample_lens[to_go]-1], marks[to_go, sample_lens[to_go]-1], state_values[to_go, sample_lens[to_go]-1, ...]
+                else:
+                    leaving_times, leaving_marks, leaving_states = timestamps[to_go, ...], marks[to_go, ...], state_values[to_go, ...]
                 resulting_times.append(leaving_times)
                 resulting_marks.append(leaving_marks)
                 resulting_states.append(leaving_states)
@@ -405,9 +417,13 @@ class PPModel(nn.Module):
                 state_values = state_values[to_stay, ...]
                 state_times = state_times[to_stay, ...]
                 batch_idx = batch_idx[:timestamps.shape[0]]
+                last_time = last_time[to_stay, ...]
                 dominating_rate = dominating_rate[to_stay, ...]
+                sample_hasnt_hit_stop_marks = sample_hasnt_hit_stop_marks[to_stay]
                 if adapt_dom_rate:
                     dynamic_dom_rates = dynamic_dom_rates[to_stay, ...]
+                if batch_idx.numel() == 0:
+                    break  # STOP SAMPLING
 
             if calculate_mark_mask:
                 mark_mask = self.determine_mark_mask(new_times, sample_lens, mask_dict)
@@ -423,9 +439,26 @@ class PPModel(nn.Module):
                 marks=None,
                 mark_mask=mark_mask,
             )
-            # print(j, new_times.min(), T, sample_lens.min(), length_limit, sample_lens.shape, dist.rate, sample_intensities["total_intensity"].mean())
+            redo_samples = torch.zeros_like(batch_idx, dtype=torch.bool)
+            if adapt_dom_rate:  # Need to check and make sure that we don't break the sampling assumption
+                redo_samples = (sample_intensities["total_intensity"] > dominating_rate).any(dim=-1)
+                if not redo_samples.any():
+                    finer_new_times = last_time + dist.sample(sample_shape=torch.Size((last_time.shape[0], finer_proposal_batch_size))).cumsum(dim=-1)/(dominating_rate*proposal_batch_size/4)
+                    finer_mark_mask = self.determine_mark_mask(finer_new_times, sample_lens, mask_dict) if calculate_mark_mask else 1.0
+                    finer_sample_intensities = self.get_intensity(  # Finer resolution check just after `last_time`
+                        state_values=state_values,
+                        state_times=state_times,
+                        timestamps=finer_new_times,
+                        marks=None,
+                        mark_mask=finer_mark_mask,
+                    )
+                    redo_samples = redo_samples | (finer_sample_intensities["total_intensity"] > dominating_rate).any(dim=-1)
+            keep_samples = ~redo_samples
+
+            # if not redo_sample:
+            # print(j, new_times.shape[0], new_times.min(), new_times.max(), T, sample_lens.min(), dominating_rate.min(), dominating_rate.mean(), dominating_rate.max())
             acceptances = torch.rand_like(new_times) <= (sample_intensities["total_intensity"] / dominating_rate)  #dominating_rate)
-            acceptances = acceptances & within_range_mask  # Don't accept any sampled events outside the window
+            acceptances = acceptances & within_range_mask & keep_samples.unsqueeze(-1) # Don't accept any sampled events outside the window or that need to be redone
             samples_w_new_events = acceptances.any(dim=-1)
             if samples_w_new_events.any():
                 event_idx = acceptances.int().argmax(dim=-1)
@@ -453,40 +486,69 @@ class PPModel(nn.Module):
                     marks[to_overwrite, sample_lens[to_overwrite]] = new_mark.squeeze(-1)[to_overwrite]
 
                 sample_lens[samples_w_new_events] += 1  # Guaranteed at least one event was either appended or overwritten
+                if stop_for_marks:
+                    sample_hasnt_hit_stop_marks = torch.where(
+                        samples_w_new_events,
+                        ~torch.isin(new_mark.squeeze(-1), stop_marks),
+                        sample_hasnt_hit_stop_marks,
+                    )
                 state = self.forward(marks, timestamps)
                 state_values, state_times = state["state_dict"]["state_values"], state["state_dict"]["state_times"]
-                last_time = torch.where(samples_w_new_events.unsqueeze(-1), new_time, torch.max(new_times, dim=-1, keepdim=True).values)  #new_time*samples_w_new_events.unsqueeze(-1) + (torch.max(new_times, dim=-1).values*(~samples_w_new_events)).unsqueeze(-1)
+                last_time = torch.where(
+                    redo_samples.unsqueeze(-1),
+                    last_time,   
+                    torch.where(samples_w_new_events.unsqueeze(-1), new_time, torch.max(new_times, dim=-1, keepdim=True).values),  #new_time*samples_w_new_events.unsqueeze(-1) + (torch.max(new_times, dim=-1).values*(~samples_w_new_events)).unsqueeze(-1)
+                )
             else:
-                last_time = torch.max(new_times, dim=-1, keepdim=True).values
+                last_time = torch.where(
+                    redo_samples.unsqueeze(-1),
+                    last_time,   
+                    torch.max(new_times, dim=-1, keepdim=True).values,
+                )
+        # else: # Redo sample
+            # print("j={} samples left={} d_rate={} si_max={} fsi_max={}".format(j, dominating_rate.shape[0], dominating_rate.max(), sample_intensities["total_intensity"].max(), finer_sample_intensities["total_intensity"].max()))
 
-            if adapt_dom_rate:        
+            if adapt_dom_rate:  
                 dynamic_dom_rates[:, k] = sample_intensities["total_intensity"].max(dim=1).values*100
                 k = (k+1) % dynamic_dom_rates.shape[1]
                 dominating_rate = torch.max(dynamic_dom_rates, dim=1, keepdim=True).values
 
-            new_times = last_time + dist.sample(sample_shape=(last_time.shape[0], proposal_batch_size)).cumsum(dim=-1)/dominating_rate
+            # print(last_time.shape, new_times.shape, proposal_batch_size, dominating_rate.shape)
+            new_times = last_time + dist.sample(sample_shape=(new_times.shape[0], proposal_batch_size)).cumsum(dim=-1)/dominating_rate
 
-        #for i,l in enumerate(sample_lens):
-        resulting_times.append(timestamps)  #timestamps[i, :l])
-        resulting_marks.append(marks)       #marks[i, :l])
-        resulting_states.append(state_values)
+        if timestamps.shape[0] > 0:  # On the chance that we hit a break after running out of samples within the loop
+            if stop_for_marks:
+                if (~sample_hasnt_hit_stop_marks).any():
+                    resulting_times.append(timestamps[~sample_hasnt_hit_stop_marks, sample_lens-1]) 
+                    resulting_marks.append(marks[~sample_hasnt_hit_stop_marks, sample_lens-1])
+                    resulting_states.append(state_values[~sample_hasnt_hit_stop_marks, sample_lens-1, ...])
+                    timestamps, marks, state_values = timestamps[sample_hasnt_hit_stop_marks, ...], marks[sample_hasnt_hit_stop_marks, ...], state_values[sample_hasnt_hit_stop_marks, ...]
+                if timestamps.shape[0] > 0:  
+                    # Hit right window limit but still have samples that haven't ended
+                    # Append sequences with times=T
+                    resulting_times.append(timestamps[:, -1]*0+T)
+                    resulting_marks.append(marks[:,-1]*0)
+                    resulting_states.append(state_values[:, -1])  # These shouldn't be used
+            else:
+                resulting_times.append(timestamps) 
+                resulting_marks.append(marks)
+                resulting_states.append(state_values)
 
         assumption_violation = False
-        for _ in range(5):
-            if adapt_dom_rate:
-                break
-            eval_times = torch.rand_like(timestamps).clamp(min=1e-8)*T
-            sample_intensities = self.get_intensity(
-                state_values=state_values,
-                state_times=state_times,
-                timestamps=eval_times,
-                marks=None,
-            )
-            if (sample_intensities["total_intensity"] > dominating_rate).any().item():
-                print("DR: {}".format(dominating_rate))
-                print("IN: {}".format(sample_intensities["total_intensity"].max().item()))
-                assumption_violation = True
-                break
+        if not adapt_dom_rate:
+            for _ in range(5):
+                eval_times = torch.rand_like(timestamps).clamp(min=1e-8)*T
+                sample_intensities = self.get_intensity(
+                    state_values=state_values,
+                    state_times=state_times,
+                    timestamps=eval_times,
+                    marks=None,
+                )
+                if (sample_intensities["total_intensity"] > dominating_rate).any().item():
+                    print("DR: {}".format(dominating_rate))
+                    print("IN: {}".format(sample_intensities["total_intensity"].max().item()))
+                    assumption_violation = True
+                    break
 
         if assumption_violation:
             print("Violation in sampling assumption occurred. Redoing sample.")
@@ -496,6 +558,276 @@ class PPModel(nn.Module):
             #     torch.cat((timestamps, torch.FloatTensor([sampled_times])), dim=-1), 
             #     torch.cat((marks, torch.LongTensor([sampled_marks])), dim=-1),
             # )
+
+    @torch.no_grad()
+    def batch_ab_sample_query(
+        self, 
+        marks, 
+        timestamps, 
+        A,
+        B,
+        dominating_rate=None, 
+        T=float('inf'), 
+        left_window=0.0, 
+        num_samples=1, 
+        proposal_batch_size=1024, 
+        adapt_dom_rate=True,
+        precision_stop=None,  # If None, then this feature is disabled. If >0.0, then the sampling of a sequence will stop once the absolute difference in upper and lower bounds is smaller than this value
+        return_raw=False,
+        marginal_mark_n=None,
+    ):
+        dyn_dom_buffer = self.dyn_dom_buffer
+        if num_samples > MAX_SAMPLE_BATCH_SIZE:  # Split into batches
+            resulting_a_ests, resulting_b_ests, resulting_ab_ests = [], [], []
+            
+            remaining_samples = num_samples
+            while remaining_samples > 0:
+                current_batch_size = min(remaining_samples, MAX_SAMPLE_BATCH_SIZE)
+                ra, rb, rab = self.batch_ab_sample_query(
+                    marks=marks, 
+                    timestamps=timestamps, 
+                    A=A,
+                    B=B,
+                    dominating_rate=dominating_rate, 
+                    T=T, 
+                    left_window=left_window, 
+                    num_samples=current_batch_size, 
+                    proposal_batch_size=1024, 
+                    adapt_dom_rate=adapt_dom_rate,
+                    precision_stop=precision_stop,
+                    return_raw=True,
+                    marginal_mark_n=marginal_mark_n,
+                )
+                remaining_samples -= current_batch_size
+                resulting_a_ests.append(ra)
+                resulting_b_ests.append(rb)
+                resulting_ab_ests.append(rab)
+
+            resulting_a_ests, resulting_b_ests, resulting_ab_ests = torch.cat(resulting_a_ests), torch.cat(resulting_b_ests), torch.cat(resulting_ab_ests)
+            results = {
+                "est": resulting_ab_ests.mean(),
+                "is_var": resulting_ab_ests.var(unbiased=False),
+                "lower_bound": resulting_a_ests.mean(),
+                "upper_bound": resulting_b_ests.mean(),
+            }
+            results["naive_var"] = results["est"] * (1-results["est"])
+            results["rel_eff"] = results["naive_var"] / results["is_var"]
+            return results
+        
+        assert(T < float('inf'))  # TODO: Implement precision based stop
+        if dominating_rate is None:
+            dominating_rate = self.dominating_rate
+        if marks is None:
+            marks = torch.LongTensor([[]], device=next(self.parameters()).device)
+            timestamps = torch.FloatTensor([[]], device=next(self.parameters()).device)
+        if isinstance(left_window, torch.Tensor):
+            left_window = left_window.item()
+        if isinstance(T, torch.Tensor):
+            T = T.item()
+        if marginal_mark_n is None:
+            target_sample_len = -1
+            stop_after_n = False
+        else:
+            target_sample_len = marginal_mark_n - 1  # If we are performing calculations for k_3 then we must sample 2 elements first, then integrate out from there
+            stop_after_n = True
+
+        sample_lens = torch.zeros((num_samples,), dtype=torch.int64).to(next(self.parameters()).device) #+ timestamps.numel()
+        marks, timestamps = marks.expand(num_samples, *marks.shape[1:]), timestamps.expand(num_samples, *timestamps.shape[1:])
+        state = self.get_states(marks, timestamps)
+        state_values, state_times, empty_state_times = state["state_values"][:, [-1], :], state["state_times"][:, [-1]], state["state_times"][:, []]  # We only need the last state, and a placeholder for the times as we are always moving ahead
+        batch_idx = torch.arange(num_samples).to(state_values.device)
+        finer_proposal_batch_size = max(proposal_batch_size // 4, 16)
+
+        dist = torch.distributions.Exponential(dominating_rate)
+        dist.rate = dist.rate.to(state_values.device)*0+1  # We will manually apply the scale to samples
+        dominating_rate = torch.ones((num_samples,1), dtype=torch.float32).to(state_values.device)*dominating_rate
+        last_time = torch.ones_like(dominating_rate) * left_window if isinstance(left_window, (int, float)) else left_window
+        new_times = last_time + dist.sample(sample_shape=torch.Size((num_samples, proposal_batch_size))).cumsum(dim=-1)/dominating_rate
+
+        if adapt_dom_rate:
+            dynamic_dom_rates = torch.ones((num_samples, dyn_dom_buffer,)).to(state_values.device)*dominating_rate
+            k = 0
+
+        # resulting_a_ests, resulting_b_ests, resulting_ab_ests = [], [], []
+        resulting_a_ests, resulting_b_ests = [], []
+        running_a_ests = torch.zeros((num_samples,), dtype=torch.float32).to(state_values.device)  # Accumulating lower bound estimates
+        running_b_ests = torch.zeros_like(running_a_ests)                                          # Accumulating upper bound estimates (or rather 1 minus the upper bound)
+        # running_ab_ests = torch.zeros_like(running_a_ests)                                         # Accumulating averaged estimates
+        running_ab_int = torch.zeros_like(running_a_ests)                                          # Accumulating integral of lambda_{AB}^*(t)
+
+        if stop_after_n: # We are performing marginal mark query, thus we reuse not_AB to be all of the available marks as (1) for events 1 to n-1, we will sample any mark and (2) for the n^th event we won't actually sample so this won't matter then anyways
+            not_AB = torch.tensor(list(range(self.num_channels))).to(state_values.device)
+        else:
+            not_AB = torch.tensor([i for i in range(self.num_channels) if (i not in A) and (i not in B)]).to(state_values.device)
+        not_AB_mask = torch.zeros((self.num_channels,), dtype=torch.float32).to(state_values.device)
+        not_AB_mask[not_AB] = 1.0
+
+
+        j = -1
+        while True: 
+            j += 1
+
+            within_range_mask = new_times <= T
+            to_stay = within_range_mask.any(dim=-1)
+            if (precision_stop is not None) and (precision_stop > 0.0):
+                to_stay = to_stay & ((running_a_ests+running_b_ests-1).abs() > precision_stop) & (running_ab_int < 10.0)
+            to_go = ~to_stay 
+            if to_go.any():
+                resulting_a_ests.append(running_a_ests[to_go])
+                resulting_b_ests.append(running_b_ests[to_go])
+
+                running_a_ests = running_a_ests[to_stay]
+                running_b_ests = running_b_ests[to_stay]
+                running_ab_int = running_ab_int[to_stay]
+
+                new_times = new_times[to_stay, ...]
+                sample_lens = sample_lens[to_stay]
+                timestamps = timestamps[to_stay, ...]
+                marks = marks[to_stay, ...]
+                state_values = state_values[to_stay, ...]
+                state_times = state_times[to_stay, ...]
+                empty_state_times = empty_state_times[to_stay, ...]
+                batch_idx = batch_idx[:timestamps.shape[0]]
+                last_time = last_time[to_stay, ...]
+                dominating_rate = dominating_rate[to_stay, ...]
+                if adapt_dom_rate:
+                    dynamic_dom_rates = dynamic_dom_rates[to_stay, ...]
+                if batch_idx.numel() == 0:
+                    break  # STOP SAMPLING
+
+            within_range_mask = new_times <= T
+            max_idx_within_range = within_range_mask.sum(dim=-1) - 1
+
+            sample_intensities = self.get_intensity(
+                state_values=state_values,
+                state_times=empty_state_times,
+                timestamps=new_times-state_times,
+                marks=None,
+                mark_mask=1.0,
+            )
+
+            last_times_intensity = self.get_intensity(
+                state_values=state_values,
+                state_times=empty_state_times,
+                timestamps=last_time-state_times,
+                marks=None,
+                mark_mask=1.0,
+            )["all_mark_intensities"]
+
+            redo_samples = torch.zeros_like(batch_idx, dtype=torch.bool)
+            if adapt_dom_rate:  # Need to check and make sure that we don't break the sampling assumption
+                redo_samples = (sample_intensities["all_mark_intensities"][..., not_AB].sum(dim=-1) > dominating_rate).any(dim=-1)
+                if not redo_samples.any():
+                    finer_new_times = last_time + dist.sample(sample_shape=torch.Size((last_time.shape[0], finer_proposal_batch_size))).cumsum(dim=-1)/(dominating_rate*proposal_batch_size/4)
+                    finer_sample_intensities = self.get_intensity(  # Finer resolution check just after `last_time`
+                        state_values=state_values,
+                        state_times=empty_state_times,
+                        timestamps=finer_new_times-state_times,
+                        marks=None,
+                        mark_mask=1.0,
+                    )
+                    redo_samples = redo_samples | (finer_sample_intensities["all_mark_intensities"][..., not_AB].sum(dim=-1) > dominating_rate).any(dim=-1)
+                
+            keep_samples = ~redo_samples
+
+            acceptances = torch.rand_like(new_times) <= (sample_intensities["all_mark_intensities"][..., not_AB].sum(dim=-1) / dominating_rate)  #dominating_rate)
+            acceptances = acceptances & within_range_mask & keep_samples.unsqueeze(-1) # Don't accept any sampled events outside the window or that need to be redone
+            not_reached_sample_len = (sample_lens < target_sample_len)
+            skip_integration = redo_samples | not_reached_sample_len
+            if stop_after_n:
+                acceptances = acceptances & not_reached_sample_len.unsqueeze(-1)
+            
+            samples_w_new_events = acceptances.any(dim=-1)
+            if samples_w_new_events.any():
+                event_idx = torch.where(
+                    samples_w_new_events,
+                    acceptances.int().argmax(dim=-1),
+                    max_idx_within_range,  # if no accepted events in a sequence, then take the last time that is still within the window
+                )
+                new_time = new_times[batch_idx, event_idx].unsqueeze(-1)
+
+                mark_probs = sample_intensities["all_mark_intensities"][batch_idx, event_idx, :].unsqueeze(-2) * not_AB_mask.unsqueeze(0).unsqueeze(0)
+                mark_probs = mark_probs / torch.sum(mark_probs, dim=-1, keepdim=True)  #F.softmax(logits, -1)
+                mark_dist = torch.distributions.Categorical(mark_probs)
+                new_mark = mark_dist.sample()  # (batch_size, 1)
+
+                sample_lens[samples_w_new_events] += 1  # Guaranteed at least one event was either appended or overwritten
+                
+                new_state = self.get_states(new_mark, new_time-state_times, old_states=state_values[:, -1, :])
+                new_state_values = new_state["state_values"][:, [-1], :]
+                state_times[samples_w_new_events, ...] = new_time[samples_w_new_events, ...]
+                state_values[samples_w_new_events, ...] = new_state_values[samples_w_new_events, ...]
+
+                all_intensities = torch.cat((last_times_intensity, sample_intensities["all_mark_intensities"]), dim=1)
+                all_times = torch.cat((last_time, new_times), dim=1)
+                a_intensity = all_intensities[..., A].sum(dim=-1)
+                b_intensity = all_intensities[..., B].sum(dim=-1)
+                ab_intensity = a_intensity + b_intensity
+                ab_int = running_ab_int.unsqueeze(-1) + F.pad(torch.cumulative_trapezoid(ab_intensity, x=all_times, dim=-1), (1,0), 'constant', 0.0)
+
+                all_possible_a_ests = F.pad(torch.cumulative_trapezoid(a_intensity*torch.exp(-ab_int), x=all_times, dim=-1), (1,0), 'constant', 0.0)
+                all_possible_b_ests = F.pad(torch.cumulative_trapezoid(b_intensity*torch.exp(-ab_int), x=all_times, dim=-1), (1,0), 'constant', 0.0)
+
+
+                running_a_ests += torch.where(skip_integration, 0.0, all_possible_a_ests[batch_idx, event_idx])  # int_0^a += int_a^b ==> int_0^b
+                running_b_ests += torch.where(skip_integration, 0.0, all_possible_b_ests[batch_idx, event_idx])
+                running_ab_int = torch.where(skip_integration, running_ab_int, ab_int[batch_idx, event_idx])
+
+                last_time = torch.where(
+                    redo_samples.unsqueeze(-1),
+                    last_time,   
+                    torch.where(samples_w_new_events.unsqueeze(-1), new_time, torch.max(new_times, dim=-1, keepdim=True).values),  #new_time*samples_w_new_events.unsqueeze(-1) + (torch.max(new_times, dim=-1).values*(~samples_w_new_events)).unsqueeze(-1)
+                )
+            else:
+
+                all_intensities = torch.cat((last_times_intensity, sample_intensities["all_mark_intensities"]), dim=1)
+                all_times = torch.cat((last_time, new_times), dim=1)
+                a_intensity = all_intensities[..., A].sum(dim=-1)
+                b_intensity = all_intensities[..., B].sum(dim=-1)
+                ab_intensity = a_intensity + b_intensity
+                ab_int = running_ab_int.unsqueeze(-1) + F.pad(torch.cumulative_trapezoid(ab_intensity, x=all_times, dim=-1), (1,0), 'constant', 0.0)
+
+                event_idx = max_idx_within_range
+                all_possible_a_ests = F.pad(torch.cumulative_trapezoid(a_intensity*torch.exp(-ab_int), x=all_times, dim=-1), (1,0), 'constant', 0.0)
+                all_possible_b_ests = F.pad(torch.cumulative_trapezoid(b_intensity*torch.exp(-ab_int), x=all_times, dim=-1), (1,0), 'constant', 0.0)
+
+                running_a_ests += torch.where(skip_integration, 0.0, all_possible_a_ests[batch_idx, event_idx])  # int_0^a += int_a^b ==> int_0^b
+                running_b_ests += torch.where(skip_integration, 0.0, all_possible_b_ests[batch_idx, event_idx])
+                running_ab_int = torch.where(skip_integration, running_ab_int, ab_int[batch_idx, event_idx])
+
+                last_time = torch.where(
+                    redo_samples.unsqueeze(-1),
+                    last_time,   
+                    torch.max(new_times, dim=-1, keepdim=True).values,
+                )
+
+            if adapt_dom_rate:  
+                dynamic_dom_rates[:, k] = sample_intensities["total_intensity"].max(dim=1).values*100
+                k = (k+1) % dynamic_dom_rates.shape[1]
+                dominating_rate = torch.max(dynamic_dom_rates, dim=1, keepdim=True).values
+
+            # print(last_time.shape, new_times.shape, proposal_batch_size, dominating_rate.shape)
+            new_times = last_time + dist.sample(sample_shape=(new_times.shape[0], proposal_batch_size)).cumsum(dim=-1)/dominating_rate
+
+        assert(running_a_ests.shape[0] == 0)
+        # resulting_a_ests, resulting_b_ests, resulting_ab_ests = torch.cat(resulting_a_ests), torch.cat(resulting_b_ests), torch.cat(resulting_ab_ests)
+        resulting_a_ests, resulting_b_ests = torch.cat(resulting_a_ests), torch.cat(resulting_b_ests)
+        resulting_b_ests = 1 - resulting_b_ests
+        resulting_ab_ests = (resulting_a_ests+resulting_b_ests)/2#0.5 + 0.5*resulting_ab_ests
+
+        if return_raw:
+            return resulting_a_ests, resulting_b_ests, resulting_ab_ests
+
+        results = {
+            "est": resulting_ab_ests.mean(),
+            "is_var": resulting_ab_ests.var(unbiased=False),
+            "lower_bound": resulting_a_ests.mean(),
+            "upper_bound": resulting_b_ests.mean(),
+        }
+        results["naive_var"] = results["est"] * (1-results["est"])
+        results["rel_eff"] = results["naive_var"] / results["is_var"]
+
+        return results 
 
     def get_param_groups(self):
         """Returns iterable of dictionaries specifying parameter groups.

@@ -180,6 +180,7 @@ def setup_model_and_optim(args, epoch_len):
         hawkes_bounded=args.hawkes_bounded,
         neural_hawkes=args.neural_hawkes,
         rmtpp=args.rmtpp,
+        dyn_dom_buffer=args.dyn_dom_buffer,
     )
 
     if args.cuda:

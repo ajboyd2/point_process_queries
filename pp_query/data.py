@@ -215,4 +215,6 @@ class PointPatternDataset(Dataset):
             len(instances), len(self.user_mapping), med_su, len(instances)/len(self.user_mapping), med_len, avg_len,
         ))
 
+        print("MAX T:", max(item["T"] for item in instances))
+
         return instances, vocab_size

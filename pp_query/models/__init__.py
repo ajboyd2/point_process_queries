@@ -19,6 +19,7 @@ def get_model(
     hawkes_bounded=True,
     neural_hawkes=False,
     rmtpp=False,
+    dyn_dom_buffer=16,
 ):
         
     if hawkes:
@@ -72,4 +73,5 @@ def get_model(
     return PPModel(
         decoder=decoder,
         num_channels=num_channels,
+        dyn_dom_buffer=dyn_dom_buffer,
     )

@@ -238,7 +238,7 @@ class HawkesDecoder(nn.Module):
 
         return c_d_t, h_d_t
 
-    def get_states(self, marks, timestamps):
+    def get_states(self, marks, timestamps, old_states=None):
         """Produce the set of hidden states from a given set of marks, timestamps, and latent vector that can then be used to calculate intensities.
         
         Arguments:
@@ -260,13 +260,19 @@ class HawkesDecoder(nn.Module):
         recurrent_input = torch.cat(components, dim=-1)
         assert(recurrent_input.shape[-1] == (self.recurrent_input_size - self.recurrent_hidden_size))
         
-        h_d, c_d, c_bar, c, delta_t, o_t = self.get_init_states(time_deltas.shape[0])
-        hidden_states = [torch.cat((h_d, o_t, c_bar, c, delta_t), -1)]
+        if old_states is None:
+            h_d, c_d, c_bar, c, delta_t, o_t = self.get_init_states(time_deltas.shape[0])
+        else:
+            h_d, o_t, c_bar, c, delta_t, c_d = torch.chunk(old_states, 6, -1)
+
+        # hidden_states = [torch.cat((h_d, o_t, c_bar, c, delta_t), -1)]
+        hidden_states = [torch.cat((h_d, o_t, c_bar, c, delta_t, c_d), -1)]
         for i in range(time_deltas.shape[1]):
             r_input, t_input = recurrent_input[:, i, :], time_deltas[:, i, :]
             c, c_bar, o_t, delta_t = self.recurrence(r_input, h_d, c_d, c_bar)
             c_d, h_d = self.decay(c, c_bar, o_t, delta_t, t_input)
-            hidden_states.append(torch.cat((h_d, o_t, c_bar, c, delta_t), -1))
+            # hidden_states.append(torch.cat((h_d, o_t, c_bar, c, delta_t), -1))
+            hidden_states.append(torch.cat((h_d, o_t, c_bar, c, delta_t, c_d), -1))
             
         hidden_states = torch.stack(hidden_states, dim=1)
         return hidden_states
@@ -292,12 +298,13 @@ class HawkesDecoder(nn.Module):
 
         selected_hidden_states = padded_state_values.gather(dim=1, index=closest_dict["closest_indices"].unsqueeze(-1).expand(-1, -1, padded_state_values.shape[-1]))
         time_embedding = self.time_embedding(timestamps, state_times)
-        h_d, o_t, c_bar, c, delta_t = torch.chunk(selected_hidden_states, 5, -1)
+        # h_d, o_t, c_bar, c, delta_t = torch.chunk(selected_hidden_states, 5, -1)
+        h_d, o_t, c_bar, c, delta_t, _ = torch.chunk(selected_hidden_states, 6, -1)
 
         _, h_t = self.decay(c, c_bar, o_t, delta_t, time_embedding)
 
         intensity_values = F.softplus(self.hidden_to_intensity_logits(h_t))
-        if isinstance(mark_mask, torch.FloatTensor):
+        if isinstance(mark_mask, torch.Tensor):
             if len(mark_mask.shape) == 1:
                 mark_mask = mark_mask.view(*((1,)*(len(intensity_values.shape)-1)), -1)
             intensity_values *= mark_mask
@@ -308,6 +315,7 @@ class HawkesDecoder(nn.Module):
         return {
             "all_log_mark_intensities": all_log_mark_intensities,
             "total_intensity": total_intensity,
+            "all_mark_intensities": intensity_values,
             "zero_probs": zero_probs,
         }
 

@@ -66,13 +66,28 @@ def evaluation_args(parser):
     group.add_argument("--marginal_mark_queries", action="store_true", help="Perform marginal mark queries.")
     group.add_argument("--marg_query_n", type=int, default=3, help="Evaluate marginal mark queries at `marg_query_n` steps ahead.")
     group.add_argument("--a_before_b_queries", action="store_true", help="Perform a before b queries.")
+    group.add_argument("--use_hit_a_b", action="store_true", help="When doing a before b queries, use alternative hitting time formulation.")
+    group.add_argument("--hit_ab_scale", type=int, default=10.0, help="Amount to scale the cutoff threshold when performing the hit_ab results.")
+    group.add_argument("--ab_precision_stop", type=float, default=1e-2, help="Cutoff precision for A before B sampled sequences.")
+    group.add_argument("--default_dominating_rate", type=float, default=200000, help="Default dominating rate for A before B samples.")
+    group.add_argument("--dynamic_buffer_size", type=int, default=512, help="Default dynamic buffer size samples.")
     group.add_argument("--just_gt", action="store_true", help="Perform only ground truth evaluation of queries.")
+    group.add_argument("--skip_gt", action="store_true", help="Skip ground truth evaluation of queries.")
+    group.add_argument("--proposal_batch_size", type=int, default=1024, help="Number of proposal event times to be considered when sampling in parallel.")
+    group.add_argument("--dyn_dom_buffer", type=int, default=16, help="Number of proposal event times to be considered when sampling in parallel.")
     group.add_argument("--num_queries", type=int, default=1000, help="Number of queries to be conducted in experiments.")
     group.add_argument("--gt_num_seqs", type=int, default=5000, help="Number of sequences to use when estimating 'ground truth'.")
+    group.add_argument("--query_batch_size", type=int, default=5000, help="Number of sequences to use when estimating 'ground truth'.")
+    group.add_argument("--continue_experiments", type=str, default=None, help="If a path is specified, will resume experiments from when last left off.")
     group.add_argument("--gt_num_int_pts", type=int, default=1000, help="Number of integration points to use when estimating 'ground truth'.")
     group.add_argument("--num_seqs", nargs="+", type=int, default=[1000, 250, 50, 20, 10, 4, 2], help="List of number of sequences to use when performing estimates.")
     group.add_argument("--num_int_pts", nargs="+", type=int, default=[1000], help="List of number of integration points to use when performing estimates.")
+    group.add_argument("--query_start_idx", type=int, default=0, help="Batch index to start experiments. Will stop at index `num_queries`.")
     #group.add_argument("--", type=, default=, help="")pin_test_memory
+    group.add_argument("--use_naive_for_gt", action="store_true", help="Use naive estimation for ground truth calculations.")
+    group.add_argument("--ab_gt_pct", type=float, default=0.25, help="Percentage of sequences to use for censoring when computing ground truth.")
+    group.add_argument("--ab_pct_splits", nargs="+", type=float, default=[0.2, 0.5, 0.8], help="List of percentages of sequences to use for censoring when computing ground truth.")
+
 
 def sampling_args(parser):
     group = parser.add_argument_group("Sampling specification arguments.")
