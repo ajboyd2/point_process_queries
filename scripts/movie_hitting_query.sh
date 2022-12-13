@@ -27,7 +27,7 @@ python -u -m pp_query.evaluate \
     --test_data_path "./data/movie/test/" \
     --neural_hawkes \
     --cuda \
-    --device_num 0 \
+    --device_num 4 \
     --calculate_is_bounds \
     --hitting_time_queries \
     # --just_gt \

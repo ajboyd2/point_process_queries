@@ -31,6 +31,7 @@ python -u -m pp_query.evaluate \
     --calculate_is_bounds \
     --marginal_mark_queries \
     --marg_query_n 3 \
+    --num_seqs 1000 250 50 20 10 4 2 \
 #    --normalize_by_window \
 #    --loss_monotonic \
     

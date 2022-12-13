@@ -27,7 +27,7 @@ python -u -m pp_query.evaluate \
     --test_data_path "./data/mooc/test/" \
     --neural_hawkes \
     --cuda \
-    --device_num 1 \
+    --device_num 3 \
     --calculate_is_bounds \
     --hitting_time_queries \
 #    --normalize_by_window \
