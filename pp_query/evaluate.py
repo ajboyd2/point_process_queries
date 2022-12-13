@@ -210,32 +210,35 @@ def _setup_marginal_mark_query(args, batch, model, num_seqs, keep_mark_pct, use_
     # accepted_marks = accepted_marks <= max(0.3, accepted_marks.min())  # Ensures at least one mark will be accepted
     num_marks_to_keep = math.ceil(keep_mark_pct*marks_of_interest.numel())
     accepted_marks = marks_of_interest[:max(num_marks_to_keep, 1)]  #[accepted_marks]
+    unaccepted_marks = torch.tensor([i for i in range(model.num_channels) if i not in accepted_marks])
+    assert(unaccepted_marks.numel() > 0)
 
     times, marks = times[..., :to_condition_on], marks[..., :to_condition_on]
     
     mmq = MarginalMarkQuery(args.marg_query_n, accepted_marks, total_marks=model.num_channels, batch_size=args.query_batch_size, device=args.device, use_tqdm=use_tqdm, proposal_batch_size=args.proposal_batch_size)
+    c_mmq = MarginalMarkQuery(args.marg_query_n, unaccepted_marks, total_marks=model.num_channels, batch_size=args.query_batch_size, device=args.device, use_tqdm=use_tqdm, proposal_batch_size=args.proposal_batch_size)
 
-    return times, marks, mmq
+    return times, marks, mmq, c_mmq
 
 def _marginal_mark_queries(args, model, dataloader, num_seqs, num_int_pts, keep_mark_pcts):
     results = {
         "is_est": [],
-        "biased_is_est": [],
+        "c_is_est": [],
         "naive_est": [],
         "naive_var": [],
         "is_var": [],
-        "biased_is_var": [],
+        "c_is_var": [],
         "rel_eff": [],
-        "biased_rel_eff": [],
+        "c_rel_eff": [],
         "avg_is_time": 0.0,
-        "avg_biased_is_time": 0.0,
+        "avg_c_is_time": 0.0,
         "avg_naive_time": 0.0,
     }
     if args.calculate_is_bounds:
         results["is_lower"] = []
         results["is_upper"] = []
-        results["biased_is_lower"] = []
-        results["biased_is_upper"] = []
+        results["c_is_lower"] = []
+        results["c_is_upper"] = []
     
     num_queries = min(args.num_queries, len(dataloader))
 
@@ -249,17 +252,17 @@ def _marginal_mark_queries(args, model, dataloader, num_seqs, num_int_pts, keep_
 
         keep_mark_pct = keep_mark_pcts[i]        
 
-        times, marks, mmq = _setup_marginal_mark_query(args, batch, model, num_seqs, keep_mark_pct)
+        times, marks, mmq, c_mmq = _setup_marginal_mark_query(args, batch, model, num_seqs, keep_mark_pct)
 
         is_t0 = time.perf_counter()
         is_res = mmq.estimate(model, num_seqs, num_int_pts, conditional_times=times, conditional_marks=marks, calculate_bounds=args.calculate_is_bounds)
         is_t1 = time.perf_counter()
         is_res = {k:v.item() for k,v in is_res.items()}
 
-        biased_is_t0 = time.perf_counter()
-        biased_is_res = mmq.alt_estimate(model, num_seqs, conditional_times=times, conditional_marks=marks)
-        biased_is_t1 = time.perf_counter()
-        biased_is_res = {k:v.item() for k,v in biased_is_res.items()}
+        c_is_t0 = time.perf_counter()
+        c_is_res = c_mmq.estimate(model, num_seqs, num_int_pts, conditional_times=times, conditional_marks=marks, calculate_bounds=args.calculate_is_bounds)
+        c_is_t1 = time.perf_counter()
+        c_is_res = {k:v.item() for k,v in c_is_res.items()}
 
         naive_t0 = time.perf_counter()
         naive_res = mmq.naive_estimate(model, num_seqs, conditional_times=times, conditional_marks=marks)
@@ -271,18 +274,18 @@ def _marginal_mark_queries(args, model, dataloader, num_seqs, num_int_pts, keep_
         results["rel_eff"].append(is_res["rel_eff"])
         results["naive_est"].append(naive_res)
 
-        results["biased_is_est"].append(biased_is_res["est"])
-        results["biased_is_var"].append(biased_is_res["is_var"])
-        results["biased_rel_eff"].append(biased_is_res["rel_eff"])
+        results["c_is_est"].append(1-c_is_res["est"])
+        results["c_is_var"].append(c_is_res["is_var"])
+        results["c_rel_eff"].append(c_is_res["rel_eff"])
 
         if args.calculate_is_bounds:
             results["is_lower"].append(is_res["lower_est"])
             results["is_upper"].append(is_res["upper_est"])
-            results["biased_is_lower"].append(biased_is_res["lower_bound"])
-            results["biased_is_upper"].append(biased_is_res["upper_bound"])
+            results["c_is_lower"].append(1-c_is_res["upper_est"])
+            results["c_is_upper"].append(1-c_is_res["lower_est"])
 
         results["avg_is_time"] += (is_t1 - is_t0) / num_queries
-        results["avg_biased_is_time"] += (biased_is_t1 - biased_is_t0) / num_queries
+        results["avg_c_is_time"] += (c_is_t1 - c_is_t0) / num_queries
         results["avg_naive_time"] += (naive_t1 - naive_t0) / num_queries
 
     return results
@@ -301,7 +304,7 @@ def _marginal_mark_queries_gt(args, model, dataloader, keep_mark_pcts):
             continue
 
         keep_mark_pct = keep_mark_pcts[i]
-        times, marks, mmq = _setup_marginal_mark_query(args, batch, model, num_seqs, keep_mark_pct, use_tqdm=False)
+        times, marks, mmq, _ = _setup_marginal_mark_query(args, batch, model, num_seqs, keep_mark_pct, use_tqdm=False)
         is_res = mmq.estimate(model, num_seqs, num_int_pts, conditional_times=times, conditional_marks=marks, calculate_bounds=False)
         gts.append(is_res["est"].item())
         effs.append(is_res["rel_eff"].item())
