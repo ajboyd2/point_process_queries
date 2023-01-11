@@ -91,7 +91,7 @@ class PPModel(nn.Module):
             "state_times": timestamps,
         }
 
-    def get_intensity(self, state_values, state_times, timestamps, marks=None, state_marks=None, mark_mask=1.0):
+    def get_intensity(self, state_values, state_times, timestamps, marks=None, state_marks=None, mark_mask=1.0, censoring=None):
         """Given a set of hidden states, timestamps, and latent_state get a tensor representing intensity valu[es at timestamps.
         Specify marks to get intensity values for specific channels."""
 
@@ -108,6 +108,21 @@ class PPModel(nn.Module):
         if marks is not None:
             intensity_dict["log_mark_intensity"] = intensity_dict["all_log_mark_intensities"].gather(dim=-1, index=marks.unsqueeze(-1)).squeeze(-1)
         
+        if censoring is not None:
+            masks = censoring.get_mask(timestamps)
+
+            intensity_dict["censored_int"] = intensity_dict["all_mark_intensities"] * masks["censored_mask"]
+            intensity_dict["observed_int"] = intensity_dict["all_mark_intensities"] * masks["observed_mask"]
+
+            if censoring.overwrite_with_censored:
+                intensity_dict["all_mark_intensities"] = intensity_dict["censored_int"]
+                intensity_dict["all_log_mark_intensities"] = torch.log(intensity_dict["censored_int"] + 1e-12)
+                intensity_dict["total_intensity"] = intensity_dict["censored_int"].sum(dim=-1)
+            elif censoring.overwrite_with_observed:
+                intensity_dict["all_mark_intensities"] = intensity_dict["observed_int"]
+                intensity_dict["all_log_mark_intensities"] = torch.log(intensity_dict["observed_int"] + 1e-12)
+                intensity_dict["total_intensity"] = intensity_dict["observed_int"].sum(dim=-1)
+
         return intensity_dict 
         
     def forward(self, marks, timestamps, sample_timestamps=None):
@@ -325,6 +340,7 @@ class PPModel(nn.Module):
         mask_dict=None, 
         adapt_dom_rate=True,
         stop_marks=None,
+        censoring=None,
     ):
         dyn_dom_buffer = self.dyn_dom_buffer
         if num_samples > MAX_SAMPLE_BATCH_SIZE:  # Split into batches
@@ -347,6 +363,7 @@ class PPModel(nn.Module):
                     mask_dict=mask_dict, 
                     adapt_dom_rate=adapt_dom_rate,
                     stop_marks=stop_marks,
+                    censoring=censoring,
                 )
                 remaining_samples -= current_batch_size
                 resulting_times.extend(sampled_times)
@@ -430,7 +447,7 @@ class PPModel(nn.Module):
 
             within_range_mask = (new_times <= T) & (sample_lens < length_limit).unsqueeze(-1)
 
-            # print(dist.rate, new_times.min(), sample_lens.min(), new_times.shape[0])
+            # print(dist.rate, new_times.min(), new_times.max(), sample_lens.min(), new_times.shape[0], (new_times > 3.4028e+36).any())
 
             sample_intensities = self.get_intensity(
                 state_values=state_values,
@@ -438,12 +455,14 @@ class PPModel(nn.Module):
                 timestamps=new_times,
                 marks=None,
                 mark_mask=mark_mask,
+                censoring=censoring,
             )
             redo_samples = torch.zeros_like(batch_idx, dtype=torch.bool)
             if adapt_dom_rate:  # Need to check and make sure that we don't break the sampling assumption
                 redo_samples = (sample_intensities["total_intensity"] > dominating_rate).any(dim=-1)
                 if not redo_samples.any():
                     finer_new_times = last_time + dist.sample(sample_shape=torch.Size((last_time.shape[0], finer_proposal_batch_size))).cumsum(dim=-1)/(dominating_rate*proposal_batch_size/4)
+                    # print("\tFine:", dist.rate, finer_new_times.min(), finer_new_times.max(), sample_lens.min(), finer_new_times.shape[0], (finer_new_times > 3.4028e+36).any())
                     finer_mark_mask = self.determine_mark_mask(finer_new_times, sample_lens, mask_dict) if calculate_mark_mask else 1.0
                     finer_sample_intensities = self.get_intensity(  # Finer resolution check just after `last_time`
                         state_values=state_values,
@@ -451,6 +470,7 @@ class PPModel(nn.Module):
                         timestamps=finer_new_times,
                         marks=None,
                         mark_mask=finer_mark_mask,
+                        censoring=censoring,
                     )
                     redo_samples = redo_samples | (finer_sample_intensities["total_intensity"] > dominating_rate).any(dim=-1)
             keep_samples = ~redo_samples

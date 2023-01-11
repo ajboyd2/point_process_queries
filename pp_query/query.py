@@ -6,318 +6,40 @@ from tqdm import tqdm
 from abc import abstractmethod
 
 from pp_query.modules.utils import flatten
+from pp_query.censor import CensoredPP
 
 ADAPT_DOM_RATE = True
 
 def batch_samples(times, marks, states, batch_size):
     return times, marks, states
-    # time_pad = torch.finfo(torch.float32).max
-    # mark_pad = 0
-    # times, marks, states = zip(*sorted(zip(times, marks, states), key=lambda x: -x[0].shape[-1]))  # sort by lengths, decreasing
-    # batches, bt, bm, bs = [], [], [], []
-    # batch_amt, batch_len = 0, None
-    # for i in range(len(times)):
-    #     t, m, s = times[i], marks[i], states[i]
-    #     if batch_len is None:
-    #         batch_len = t.shape[-1]
-    #     else:
-    #         to_pad = batch_len - t.shape[-1]
-    #         t = F.pad(t, pad=(0, to_pad), mode='constant', value=time_pad)
-    #         m = F.pad(m, pad=(0, to_pad), mode='constant', value=mark_pad)
-    #         s = F.pad(s, pad=(0, 0, 0, to_pad), mode='replicate')
-    #     bt.append(t); bm.append(m); bs.append(s)
-
-    #     if (batch_amt >= batch_size) or (i == len(times)-1):
-    #         batches.append((
-    #             torch.cat(bt, dim=0),
-    #             torch.cat(bm, dim=0),
-    #             torch.cat(bs, dim=0),
-    #         ))
-    #         bt, bm, bs = [], [], []
-    #         batch_amt, batch_len = 0, None
-
-    # return zip(*batches)
-
-class CensoredPP:
-    def __init__(self, base_process, observed_marks, num_sampled_sequences, use_same_seqs_for_ratio=False, batch_size=256, device=torch.device("cpu"), use_tqdm=True, proposal_batch_size=1024):
-        assert(len(observed_marks) > 0)  # K=6, observed_marks=[0,1,2] ==> censored_marks=[3,4,5]
-        assert(num_sampled_sequences > 0)
-
-        self.base_process = base_process
-        self.marks = base_process.num_channels
-        self.observed_marks = torch.LongTensor(observed_marks)
-        assert(len(self.observed_marks.shape) == 1)
-        self.censored_marks = torch.LongTensor([i for i in range(self.marks) if i not in observed_marks])
-
-        self.num_sampled_sequences = num_sampled_sequences
-        self.use_same_seqs_for_ratio = use_same_seqs_for_ratio
-        if not use_same_seqs_for_ratio:
-            assert(num_sampled_sequences % 2 == 0) # we will use half of sequences for numerator and half for denominator
-
-        self.dominating_rate = base_process.dominating_rate
-        self.cond_seqs = None
-        self.cond_left_window = None
-        self.cond_right_window = None
-        self.cond_fixed_times = None
-        self.cond_fixed_marks = None
-
-        self.batch_size = batch_size
-        self.device = device
-        self.use_tqdm = use_tqdm
-        self.proposal_batch_size = proposal_batch_size
-
-    @torch.no_grad()
-    def gen_cond_seqs(
-        self,
-        right_window,  # Max time to go out until
-        left_window,   # Where to start sampling
-        fixed_times,   # Either times of events prior to sampling, or that are guaranteed to occur in the middle of sampling
-        fixed_marks,   # Corresponding marks of `fixed_times`
-    ):
-        if fixed_times is None:
-            fixed_times = torch.FloatTensor([[]]).to(self.device)
-            fixed_marks = torch.LongTensor([[]]).to(self.device)
-
-        if self.cond_seqs is not None:
-            if (self.cond_fixed_times == fixed_times).all() and (self.cond_fixed_marks == fixed_marks).all() and (self.cond_left_window == left_window):
-                if self.cond_right_window >= right_window:
-                    return self.cond_seqs
-                else:
-                    return self.extend_cond_seqs(right_window)
-        self.cond_left_window, self.cond_right_window = left_window, right_window
-        self.cond_fixed_times, self.cond_fixed_marks = fixed_times, fixed_marks
-
-        n = self.num_sampled_sequences
-        # cond_times, cond_marks = [], []
-        mark_mask = torch.ones((self.marks,), dtype=torch.float32).to(self.device)
-        mark_mask[self.observed_marks] = 0.0  # Only sample the censored marks (to marginalize them out)
-        numer_cond_times, numer_cond_marks, numer_states = self.base_process.batch_sample_points(
-            T=right_window, 
-            left_window=left_window, 
-            timestamps=fixed_times, 
-            marks=fixed_marks,
-            dominating_rate=self.dominating_rate,
-            mark_mask=mark_mask,
-            num_samples=n // (1 if self.use_same_seqs_for_ratio else 2),
-            proposal_batch_size=self.proposal_batch_size,
-        )
-        numer_cond_times, numer_cond_marks, _ = batch_samples(numer_cond_times, numer_cond_marks, numer_states, self.batch_size)
-
-        if self.use_same_seqs_for_ratio:
-            self.cond_seqs = {
-                "numer_cond_times": numer_cond_times,
-                "numer_cond_marks": numer_cond_marks,
-                "denom_cond_times": numer_cond_times,
-                "denom_cond_marks": numer_cond_marks,
-            }
+    '''
+    time_pad = torch.finfo(torch.float32).max
+    mark_pad = 0
+    times, marks, states = zip(*sorted(zip(times, marks, states), key=lambda x: -x[0].shape[-1]))  # sort by lengths, decreasing
+    batches, bt, bm, bs = [], [], [], []
+    batch_amt, batch_len = 0, None
+    for i in range(len(times)):
+        t, m, s = times[i], marks[i], states[i]
+        if batch_len is None:
+            batch_len = t.shape[-1]
         else:
-            denom_cond_times, denom_cond_marks, denom_states = self.base_process.batch_sample_points(
-                T=right_window, 
-                left_window=left_window, 
-                timestamps=fixed_times, 
-                marks=fixed_marks,
-                dominating_rate=self.dominating_rate,
-                mark_mask=mark_mask,
-                num_samples=n//2,
-                proposal_batch_size=self.proposal_batch_size,
-            )
+            to_pad = batch_len - t.shape[-1]
+            t = F.pad(t, pad=(0, to_pad), mode='constant', value=time_pad)
+            m = F.pad(m, pad=(0, to_pad), mode='constant', value=mark_pad)
+            s = F.pad(s, pad=(0, 0, 0, to_pad), mode='replicate')
+        bt.append(t); bm.append(m); bs.append(s)
 
-            denom_cond_times, denom_cond_marks, _ = batch_samples(denom_cond_times, denom_cond_marks, denom_states, self.batch_size)
+        if (batch_amt >= batch_size) or (i == len(times)-1):
+            batches.append((
+                torch.cat(bt, dim=0),
+                torch.cat(bm, dim=0),
+                torch.cat(bs, dim=0),
+            ))
+            bt, bm, bs = [], [], []
+            batch_amt, batch_len = 0, None
 
-            self.cond_seqs = {
-                "numer_cond_times": numer_cond_times,
-                "numer_cond_marks": numer_cond_marks,
-                "denom_cond_times": denom_cond_times,
-                "denom_cond_marks": denom_cond_marks,
-            }
-
-        return self.cond_seqs
-
-    @torch.no_grad()
-    def extend_cond_seqs(self, right_window):
-        print("EXTENDING")
-        n = self.num_sampled_sequences
-        cond_times, cond_marks = self.cond_seqs["numer_cond_times"], self.cond_seqs["numer_cond_marks"]
-        if not self.use_same_seqs_for_ratio:
-            cond_times += self.cond_seqs["denom_cond_times"]
-            cond_marks += self.cond_seqs["denom_cond_marks"]
-        assert(n == len(cond_times))
-
-        mark_mask = torch.ones((self.marks,), dtype=torch.float32).to(self.device)
-        mark_mask[self.observed_marks] = 0.0  # Only sample the censored marks (to marginalize them out)
-        for i in range(n):
-            fixed_times, fixed_marks = cond_times[i], cond_marks[i]
-            times, marks = self.base_process.sample_points(
-                T=right_window, 
-                left_window=self.right_window, 
-                timestamps=fixed_times, 
-                marks=fixed_marks,
-                dominating_rate=self.dominating_rate,
-                mark_mask=mark_mask,
-            )
-            cond_times[i], cond_marks[i] = times, marks
-
-        if self.use_same_seqs_for_ratio:
-            self.cond_seqs = {
-                "numer_cond_times": cond_times,
-                "numer_cond_marks": cond_marks,
-                "denom_cond_times": cond_times,
-                "denom_cond_marks": cond_marks,
-            }
-        else:
-            self.cond_seqs = {
-                "numer_cond_times": cond_times[:n//2],
-                "numer_cond_marks": cond_marks[:n//2],
-                "denom_cond_times": cond_times[n//2:],
-                "denom_cond_marks": cond_marks[n//2:],
-            }
-
-        self.cond_right_window = right_window
-        return self.cond_seqs
-
-    @torch.no_grad()
-    def intensity(
-        self, 
-        t, 
-        conditional_times, 
-        conditional_marks, 
-        cond_seqs=None,
-        censoring_start_time=0.0,
-    ):
-        if not isinstance(t, (int, float)):
-            return torch.FloatTensor([self.intensity(_t, conditional_times, conditional_marks, cond_seqs, censoring_start_time) for _t in t])
-
-        if conditional_times is None:
-            conditional_times, conditional_marks = torch.FloatTensor([]), torch.LongTensor([])
-
-        if t <= censoring_start_time:
-            return self.base_process.intensity(t, conditional_times, conditional_marks)
-
-        if cond_seqs is None:  # sample conditional sequences for expected values
-            cond_seqs = self.gen_cond_seqs(
-                right_window=t, 
-                left_window=censoring_start_time, 
-                fixed_times=conditional_times, 
-                fixed_marks=conditional_marks,
-            )  # sampled_times and sampled_marks will be included in the resulting sequences
-
-        numer, denom = 0.0, 0.0
-        pp = self.base_process
-        num_seqs = self.num_sampled_sequences // (1 if self.use_same_seqs_for_ratio else 2)
-        obs, cen = self.observed_marks, self.censored_marks
-        for i in range(num_seqs):
-            numer_times, numer_marks = cond_seqs["numer_cond_times"][i], cond_seqs["numer_cond_marks"][i]
-            n = pp.intensity(t, numer_times, numer_marks) * torch.exp(-pp.compensator(censoring_start_time, t, numer_times, numer_marks)["integral"][obs].sum())
-
-            denom_times, denom_marks = cond_seqs["denom_cond_times"][i], cond_seqs["denom_cond_marks"][i]
-            d = torch.exp(-pp.compensator(censoring_start_time, t, denom_times, denom_marks)["integral"][obs].sum())
-
-            numer += n / num_seqs
-            denom += d / num_seqs
-
-        numer[cen] *= 0.0  # zero out censored intensities as they are ill-defined here
-
-        return numer / denom
-
-    @torch.no_grad()
-    def compensator(
-        self, 
-        a, 
-        b, 
-        conditional_times, 
-        conditional_marks, 
-        num_samples=1000, 
-        cond_seqs=None, 
-        censoring_start_time=0.0, 
-    ):
-        if cond_seqs is None:  # sample conditional sequences for expected values
-            cond_seqs = self.gen_cond_seqs(
-                right_window=b, 
-                left_window=censoring_start_time, 
-                fixed_times=conditional_times, 
-                fixed_marks=conditional_marks,
-            )  # sampled_times and sampled_marks will be included in the resulting sequences
-
-        numer, denom = 0.0, 0.0
-
-        ts = torch.linspace(a, b, num_samples).to(self.device)
-        num_seqs = self.num_sampled_sequences // 2
-        mark_mask = torch.ones((self.marks,), dtype=torch.float32).to(self.device)
-        if len(self.censored_marks) > 0:
-            mark_mask[self.censored_marks] = 0.0
-
-        for numer_times, numer_marks in tqdm(zip(cond_seqs["numer_cond_times"], cond_seqs["numer_cond_marks"]), disable=not self.use_tqdm):
-            intensity = self.base_process.get_intensity(
-                state_values=None, 
-                state_times=numer_times, 
-                timestamps=ts.unsqueeze(0).expand(numer_times.shape[0], -1), 
-                marks=None, 
-                state_marks=numer_marks, 
-                mark_mask=1.0,
-            )["all_log_mark_intensities"].exp()*mark_mask.unsqueeze(0)
-            numer_comp = self.base_process.compensator_grid(a, b, numer_times, numer_marks, num_samples-1) * mark_mask.unsqueeze(0) #[np.newaxis, :]
-            if censoring_start_time < a:
-                nc = self.base_process.compensator(censoring_start_time, a, numer_times, numer_marks)["integral"] * mark_mask
-                numer_comp += nc
-            numer += torch.sum(intensity * torch.exp(-torch.sum(numer_comp, dim=-1, keepdim=True)), dim=0, keepdim=True) / num_seqs #(num_seqs*numer_comp.shape[0])
-            if self.use_same_seqs_for_ratio:
-                denom += torch.sum(torch.exp(-torch.sum(numer_comp, dim=-1, keepdim=True)), dim=0, keepdim=True) / num_seqs #(num_seqs*numer_comp.shape[0])
-
-        if not self.use_same_seqs_for_ratio:
-            for denom_times, denom_marks in tqdm(zip(cond_seqs["denom_cond_times"], cond_seqs["denom_cond_marks"]), disable=not self.use_tqdm):
-                denom_comp = self.base_process.compensator_grid(a, b, denom_times, denom_marks, num_samples-1) * mark_mask.unsqueeze(0) #[np.newaxis, :]
-                if censoring_start_time < a:
-                    denom_comp += self.base_process.compensator(censoring_start_time, a, denom_times, denom_marks)["integral"] * mark_mask
-                denom += torch.sum(torch.exp(-torch.sum(denom_comp, dim=-1, keepdim=True)), dim=0, keepdim=True) / num_seqs #(num_seqs*denom_comp.shape[0])
-
-        # for i in tqdm(range(num_seqs), disable=not self.use_tqdm):
-        #     numer_times, numer_marks = cond_seqs["numer_cond_times"][i], cond_seqs["numer_cond_marks"][i]
-        #     denom_times, denom_marks = cond_seqs["denom_cond_times"][i], cond_seqs["denom_cond_marks"][i]
-
-        #     # intensity = np.array([self.base_process.intensity(t, numer_times, numer_marks)*mark_mask for t in ts])
-        #     # intensity = self.base_process.get_intensity(ts, numer_times, numer_marks)*mark_mask.unsqueeze(0) #[np.newaxis, :]
-        #     intensity = self.base_process.get_intensity(
-        #         state_values=None, 
-        #         state_times=numer_times, 
-        #         timestamps=ts.unsqueeze(0).expand(numer_times.shape[0], -1), 
-        #         marks=None, 
-        #         state_marks=numer_marks, 
-        #         mark_mask=1.0,
-        #     )["all_log_mark_intensities"].exp()*mark_mask.unsqueeze(0)
-        #     numer_comp = self.base_process.compensator_grid(a, b, numer_times, numer_marks, num_samples-1) * mark_mask.unsqueeze(0) #[np.newaxis, :]
-        #     if self.use_same_seqs_for_ratio:
-        #         denom_comp = numer_comp
-        #     else:
-        #         denom_comp = self.base_process.compensator_grid(a, b, denom_times, denom_marks, num_samples-1) * mark_mask.unsqueeze(0) #[np.newaxis, :]
-
-        #     if censoring_start_time < a:
-        #         nc = self.base_process.compensator(censoring_start_time, a, numer_times, numer_marks)["integral"] * mark_mask
-        #         numer_comp += nc
-        #         if self.use_same_seqs_for_ratio:
-        #             denom_comp = numer_comp
-        #         else:
-        #             denom_comp += self.base_process.compensator(censoring_start_time, a, denom_times, denom_marks)["integral"] * mark_mask
-
-        #     numer += torch.sum(intensity * torch.exp(-torch.sum(numer_comp, dim=-1, keepdim=True)), dim=0, keepdim=True) / (num_seqs*numer_comp.shape[0])
-        #     denom += torch.sum(torch.exp(-torch.sum(denom_comp, dim=-1, keepdim=True)), dim=0, keepdim=True) / (num_seqs*denom_comp.shape[0])
-        
-        #numer, denom = sum(numer), sum(denom)  # each are size (num_samples, marks)
-        censored_intensities = numer / denom
-        # Perform trapezoidal rule to approximate \int_a^b of censored_intensity(t) dt
-        return torch.trapezoid(censored_intensities, x=ts, dim=-2)
-
-    @torch.no_grad()
-    def sample(self, right_window=None, left_window=0.0, length_limit=None, sampled_times=None, sampled_marks=None, mark_mask=1.0): 
-        mark_mask = torch.ones((self.marks,), dtype=torch.float32) * mark_mask
-        mark_mask[self.censored_marks] = 0.0  # don't allow samples of censored marks
-        return super().sample(
-            marks=sampled_marks, 
-            timestamps=sampled_times,
-            dominating_rate=self.dominating_rate, 
-            T=right_window, 
-            left_window=left_window, 
-            mark_mask=mark_mask,
-        )
+    return zip(*batches)
+    '''
 
 
 class Query:
@@ -342,6 +64,7 @@ class Query:
     @abstractmethod
     def proposal_dist_sample(self, model, num_samples=1):
         pass
+
 
 class TemporalMarkQuery(Query):
 
@@ -723,6 +446,7 @@ class UnbiasedHittingTimeQuery(TemporalMarkQuery):
             result["lower_est"], result["upper_est"] = 1 - result["upper_est"], 1 - result["lower_est"]  # Need to calculate the complement and swap upper and lower bounds
         return result
 
+
 class MarginalMarkQuery(PositionalMarkQuery):
 
     def __init__(
@@ -803,6 +527,7 @@ class MarginalMarkQuery(PositionalMarkQuery):
         )
         model.dyn_dom_buffer = old_buffer_size
         return results
+
 
 class ABeforeBQuery(Query):
 
