@@ -19,7 +19,8 @@ from pp_query.utils import print_log
 from pp_query.models import get_model
 from pp_query.train import load_checkpoint, setup_model_and_optim, set_random_seed, get_data
 from pp_query.arguments import get_args
-from pp_query.query import ABeforeBQuery, PositionalMarkQuery, TemporalMarkQuery, CensoredPP, UnbiasedHittingTimeQuery, MarginalMarkQuery
+from pp_query.query import ABeforeBQuery, PositionalMarkQuery, TemporalMarkQuery, UnbiasedHittingTimeQuery, MarginalMarkQuery
+from pp_query.censor import CensoredPP, CensoredTimeline
 
 def save_results(args, results, suffix=""):
     fp = args.checkpoint_path.rstrip("/")
@@ -29,6 +30,10 @@ def save_results(args, results, suffix=""):
         fp += "/marginal_queries"
     elif args.a_before_b_queries:
         fp += "/a_before_b_queries"
+    elif args.censored_log_likelihood:
+        fp += "/censored_log_likelihood"
+    elif args.censored_next_event:
+        fp += "/censored_next_event"
 
     folders = fp.split("/")
     for i in range(len(folders)):
@@ -549,6 +554,180 @@ def a_before_b_queries(args, model, dataloader, results=None):
     save_results(args, results, file_suffix)
     return results
 
+def censored_log_likelihood(args, model, dataloader, results=None):
+    file_suffix = datetime.datetime.now().strftime('%m_%d_%Y_%H_%M_%S')
+
+    seed = args.seed
+    if results is None:
+        results = {}
+
+    num_seqs = args.num_seqs[0] if isinstance(args.num_seqs, list) else args.num_seqs
+    num_int_pts = args.num_int_pts[0] if isinstance(args.num_int_pts, list) else args.num_int_pts
+
+    args.seed = seed 
+    set_random_seed(args)
+
+    for i, pct in enumerate(args.censored_mark_pcts):
+        args.seed = seed + math.floor(pct*10000)
+        set_random_seed(args)
+        if pct not in results:
+            print_log("Commencing censored log likelihood experiment with {} censoring percentage, {} sampled seqs, and {} integration pts.".format(pct, num_seqs, num_int_pts))
+            results[pct] = _censored_log_likelihood(args, model, dataloader, pct, num_seqs, num_int_pts)
+        else:
+            print_log("Skipping {} censorship percentage.".format(pct))
+
+        save_results(args, results, file_suffix)
+    
+    save_results(args, results, file_suffix)
+    return results
+
+def _censored_log_likelihood(args, model, dataloader, censor_mark_pct, num_seqs, num_int_pts):
+    M = model.num_channels
+    results = {
+        "num_seqs": num_seqs, 
+        "num_int_pts": num_int_pts,
+        "original_ll": [],
+        "naive_ll": [],
+        "baseline_ll": [],
+        "censored_ll": [],
+        "total_marks": M,
+        "unique_marks": [],
+        "kept_marks": [],
+    }
+
+    dl_iter = iter(dataloader)
+    num_queries = min(args.num_queries, len(dataloader))
+    for i in tqdm(range(num_queries)):
+        batch = next(dl_iter)
+        if args.cuda:
+            batch = {k:v.to(args.device) for k,v in batch.items()}
+
+        original_times, original_marks, T = batch["tgt_times"], batch["tgt_marks"], batch["T"].item()
+
+        unique_marks = torch.unique(original_marks.squeeze(0))
+        num_unique = unique_marks.numel()
+        if num_unique <= 1:
+            continue
+        num_to_keep = max(math.floor(num_unique*censor_mark_pct), 1)
+        results["unique_marks"].append(num_unique)
+        results["kept_marks"].append(num_to_keep)
+
+        marks_to_censor = sorted(unique_marks[torch.randperm(num_unique)[:num_to_keep]].tolist())
+        censoring = CensoredTimeline(
+            boundaries=(0.0, T), 
+            censored_marks=marks_to_censor, 
+            total_marks=M, 
+            relative_start=False, 
+            device=args.device,
+        )
+
+        censored_model = CensoredPP(
+            base_process=model, 
+            censoring=censoring, 
+            num_sampled_sequences=num_seqs, 
+            use_same_seqs_for_ratio=True, 
+            proposal_batch_size=1024, 
+            num_integral_pts=num_int_pts,
+        )
+
+        single_result = censored_model.ll_pred_experiment_pass(
+            uncensored_times=original_times, 
+            uncensored_marks=original_marks, 
+            T=T,
+        )
+        for k,v in single_result.items():
+            results[k+"_ll"].append(v["log_likelihood"].item())
+    
+    return results
+
+def censored_next_event(args, model, dataloader, results=None):
+    file_suffix = datetime.datetime.now().strftime('%m_%d_%Y_%H_%M_%S')
+
+    seed = args.seed
+    if results is None:
+        results = {}
+
+    num_seqs = args.num_seqs[0] if isinstance(args.num_seqs, list) else args.num_seqs
+    num_int_pts = args.num_int_pts[0] if isinstance(args.num_int_pts, list) else args.num_int_pts
+
+    args.seed = seed 
+    set_random_seed(args)
+
+    for i, pct in enumerate(args.censored_mark_pcts):
+        args.seed = seed + math.floor(pct*10000)
+        set_random_seed(args)
+        if pct not in results:
+            print_log("Commencing censored next event experiment with {} censoring percentage, {} sampled seqs, and {} integration pts.".format(pct, num_seqs, num_int_pts))
+            results[pct] = _censored_next_event(args, model, dataloader, pct, num_seqs, num_int_pts)
+        else:
+            print_log("Skipping {} censorship percentage.".format(pct))
+
+        save_results(args, results, file_suffix)
+    
+    save_results(args, results, file_suffix)
+    return results
+
+def _censored_next_event(args, model, dataloader, censor_mark_pct, num_seqs, num_int_pts):
+    M = model.num_channels
+    results = {
+        "num_seqs": num_seqs, 
+        "num_int_pts": num_int_pts,
+        "true_time": [],
+        "true_mark": [],
+        "naive_time_est": [],
+        "naive_mark_dist": [],
+        "cen_time_est": [],
+        "cen_mark_dist": [],
+        "total_marks": M,
+        "unique_marks": [],
+        "kept_marks": [],
+    }
+
+    dl_iter = iter(dataloader)
+    num_queries = min(args.num_queries, len(dataloader))
+    for i in tqdm(range(num_queries)):
+        batch = next(dl_iter)
+        if args.cuda:
+            batch = {k:v.to(args.device) for k,v in batch.items()}
+
+        original_times, original_marks, T = batch["tgt_times"], batch["tgt_marks"], batch["T"].item()
+
+        unique_marks = torch.unique(original_marks.squeeze(0))
+        num_unique = unique_marks.numel()
+        if num_unique <= 1:
+            continue
+        num_to_keep = max(math.floor(num_unique*censor_mark_pct), 1)
+        results["unique_marks"].append(num_unique)
+        results["kept_marks"].append(num_to_keep)
+
+        marks_to_censor = sorted(unique_marks[torch.randperm(num_unique)[:num_to_keep]].tolist())
+        censoring = CensoredTimeline(
+            boundaries=(0.0, T), 
+            censored_marks=marks_to_censor, 
+            total_marks=M, 
+            relative_start=False, 
+            device=args.device,
+        )
+
+        censored_model = CensoredPP(
+            base_process=model, 
+            censoring=censoring, 
+            num_sampled_sequences=num_seqs, 
+            use_same_seqs_for_ratio=True, 
+            proposal_batch_size=1024, 
+            num_integral_pts=num_int_pts,
+        )
+
+        single_result = censored_model.future_pred_experiment_pass(
+            uncensored_times=original_times, 
+            uncensored_marks=original_marks, 
+            T=T,
+        )
+        for k,v in single_result.items():
+            results[k].append(v.item() if "dist" not in k else v.cpu().tolist())
+    
+    return results
+
 def main():
     print_log("Getting arguments.")
     args = get_args()
@@ -589,6 +768,10 @@ def main():
             marginal_mark_queries(args, model, valid_dataloader, partial_res)
         elif args.a_before_b_queries:
             a_before_b_queries(args, model, valid_dataloader, partial_res)
+        elif args.censored_log_likelihood:
+            censored_log_likelihood(args, model, valid_dataloader, partial_res)
+        elif args.censored_next_event:
+            censored_next_event(args, model, valid_dataloader, partial_res)
     
 
 
