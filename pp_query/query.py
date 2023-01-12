@@ -6,7 +6,6 @@ from tqdm import tqdm
 from abc import abstractmethod
 
 from pp_query.modules.utils import flatten
-from pp_query.censor import CensoredPP
 
 ADAPT_DOM_RATE = True
 

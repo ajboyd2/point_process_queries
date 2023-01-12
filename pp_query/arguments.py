@@ -87,6 +87,9 @@ def evaluation_args(parser):
     group.add_argument("--use_naive_for_gt", action="store_true", help="Use naive estimation for ground truth calculations.")
     group.add_argument("--ab_gt_pct", type=float, default=0.25, help="Percentage of sequences to use for censoring when computing ground truth.")
     group.add_argument("--ab_pct_splits", nargs="+", type=float, default=[0.2, 0.5, 0.8], help="List of percentages of sequences to use for censoring when computing ground truth.")
+    group.add_argument("--censored_log_likelihood", action="store_true", help="Perform censored log likelihood experiments.")
+    group.add_argument("--censored_next_event", action="store_true", help="Perform censored log likelihood experiments.")
+    group.add_argument("--censored_mark_pcts", nargs="+", type=float, default=[0.2, 0.4, 0.5, 0.6, 0.8], help="List of percentages to randomly censor marks in sequences for censoring experiments.")
 
 
 def sampling_args(parser):

@@ -147,9 +147,7 @@ class CensoredPP:
     def intensity(self, existing_times, existing_marks, eval_times, integrate_results=False, stable_mean=True):
         assert(eval_times.dim() == 1 and existing_times.dim() == 1 and existing_marks.dim() == 1)
         censoring_start, censoring_end = self.censoring.start_time, eval_times.max()
-        print("sampling")
         sampled_times, sampled_marks, sampled_states = self._generate_supporting_seqs(existing_times, existing_marks, censoring_end)
-        print('done sampling\n')
         grid_times = torch.linspace(
             0.0 if integrate_results else censoring_start, 
             censoring_end, 
@@ -188,12 +186,8 @@ class CensoredPP:
         else:
             all_sorted_estimates = numer_total / denom_total
 
-        print("all_sorted", all_sorted_estimates.shape, all_sorted_estimates.isnan().any())
-        print(all_sorted_estimates[:5, 2].tolist(), all_sorted_estimates[-5:, 2].tolist())
         all_estimates = all_sorted_estimates.gather(-2, all_sorted_indices.squeeze(0).unsqueeze(-1).expand(*all_sorted_estimates.shape).argsort(-2))
-        print("all_estimates", all_estimates.shape, all_estimates.isnan().any())
         eval_estimates = all_estimates[:len(eval_times), :]
-        print("eval_estimates", eval_estimates.shape, eval_estimates.isnan().any())
         results = {"intensity": eval_estimates}
 
         if integrate_results:  # Instead of returning the \lambda(t), return \int_0^t \lambda(s) ds
@@ -202,9 +196,6 @@ class CensoredPP:
             all_int_estimates = all_sorted_int_estimates.gather(-2, all_sorted_indices.squeeze(0).unsqueeze(-1).expand(*all_sorted_int_estimates.shape).argsort(-2))
             eval_int_estimates = all_int_estimates[:len(eval_times), :]
             results["compensator"] = eval_int_estimates
-
-        for k,v in results.items():
-            print(k, v.shape, v.isnan().any())
 
         return results
 
@@ -331,6 +322,102 @@ class CensoredPP:
         )
 
         return results
+
+    @torch.no_grad()
+    def future_pred_experiment_pass(self, uncensored_times, uncensored_marks, T):
+        n = uncensored_times.shape[-1]
+        hist_times, target_time = uncensored_times[..., :n//2], uncensored_times[..., n//2].squeeze()
+        hist_marks, target_mark = uncensored_marks[..., :n//2], uncensored_marks[..., n//2].squeeze()
+        cond_end_time = hist_times.max()
+        new_boundaries = [(a, min(b, cond_end_time.item()-1e-8)) for (a,b) in self.censoring.boundaries if a < cond_end_time]  # We want the censoring to end just before the last event being conditioned on
+        censoring = CensoredTimeline(
+            boundaries=new_boundaries,
+            censored_marks=self.censoring.censored_marks[:len(new_boundaries)], 
+            total_marks=self.censoring.total_marks, 
+            relative_start=False, 
+            device=self.device,
+        )
+        obs_hist_times, obs_hist_marks = censoring.filter_sequences(times=hist_times, marks=hist_marks)
+        results = {
+            "true_time": target_time.squeeze(),
+            "true_mark": target_mark.squeeze(),
+        }
+
+        fine_grid_pts = torch.linspace(1e-8, T/100, self.num_integral_pts, device=self.device)
+        medium_grid_pts = torch.linspace(T/100, T/10, self.num_integral_pts, device=self.device)
+        coarse_grid_pts = torch.linspace(T/10, T, self.num_integral_pts, device=self.device)
+        grid_pts = cond_end_time + (T - cond_end_time) * torch.cat(
+            (fine_grid_pts, medium_grid_pts, coarse_grid_pts), 
+            dim=-1,
+        ).unsqueeze(0)
+
+        future_naive_intensity = self.base_process.get_intensity(
+            state_values=None, 
+            state_times=obs_hist_times, 
+            timestamps=grid_pts, 
+            marks=None, 
+            state_marks=obs_hist_marks, 
+            censoring=None,
+        )["all_mark_intensities"]
+        future_naive_total_intensity = future_naive_intensity.sum(dim=-1)
+        future_naive_compensator = F.pad(
+            torch.cumulative_trapezoid(
+                y=future_naive_total_intensity,
+                x=grid_pts,
+                dim=-1,
+            ),
+            (1,0),
+            'constant', 
+            0,
+        )
+        future_naive_compensator = torch.exp(-future_naive_compensator)
+        naive_time_est = torch.trapezoid(
+            y=grid_pts*future_naive_total_intensity*future_naive_compensator,
+            x=grid_pts,
+            dim=-1,
+        )
+        naive_mark_dist = torch.trapezoid(
+            y=future_naive_intensity*future_naive_compensator.unsqueeze(-1),
+            x=grid_pts.unsqueeze(-1),
+            dim=-2,
+        )
+        results["naive_time_est"] = naive_time_est.squeeze()
+        results["naive_mark_dist"] = naive_mark_dist.squeeze()
+        
+        future_cen_intensity = self.intensity(
+            existing_times=obs_hist_times.squeeze(0),
+            existing_marks=obs_hist_marks.squeeze(0),
+            eval_times=grid_pts.squeeze(0),
+            integrate_results=False,
+            stable_mean=True,
+        )["intensity"].unsqueeze(0)
+        future_cen_total_intensity = future_cen_intensity.sum(dim=-1)
+        future_cen_compensator = F.pad(
+            torch.cumulative_trapezoid(
+                y=future_cen_total_intensity,
+                x=grid_pts,
+                dim=-1,
+            ),
+            (1,0),
+            'constant', 
+            0,
+        )
+        future_cen_compensator = torch.exp(-future_cen_compensator)
+        cen_time_est = torch.trapezoid(
+            y=grid_pts*future_cen_total_intensity*future_cen_compensator,
+            x=grid_pts,
+            dim=-1,
+        )
+        cen_mark_dist = torch.trapezoid(
+            y=future_cen_intensity*future_cen_compensator.unsqueeze(-1),
+            x=grid_pts.unsqueeze(-1),
+            dim=-2,
+        )
+        results["cen_time_est"] = cen_time_est.squeeze()
+        results["cen_mark_dist"] = cen_mark_dist.squeeze()
+
+        return results
+
 
 '''
 class CensoredPP_orig:
