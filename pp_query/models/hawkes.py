@@ -106,6 +106,15 @@ class HawkesModel(PPModel):
             intensity_dict["censored_int"] = intensity_dict["all_mark_intensities"] * masks["censored_mask"]
             intensity_dict["observed_int"] = intensity_dict["all_mark_intensities"] * masks["observed_mask"]
 
+            if censoring.overwrite_with_censored:
+                intensity_dict["all_mark_intensities"] = intensity_dict["censored_int"]
+                intensity_dict["all_log_mark_intensities"] = torch.log(intensity_dict["censored_int"] + 1e-12)
+                intensity_dict["total_intensity"] = intensity_dict["censored_int"].sum(dim=-1)
+            elif censoring.overwrite_with_observed:
+                intensity_dict["all_mark_intensities"] = intensity_dict["observed_int"]
+                intensity_dict["all_log_mark_intensities"] = torch.log(intensity_dict["observed_int"] + 1e-12)
+                intensity_dict["total_intensity"] = intensity_dict["observed_int"].sum(dim=-1)
+
         if marks is not None:
             intensity_dict["log_mark_intensity"] = intensity_dict["all_log_mark_intensities"].gather(dim=-1, index=marks.unsqueeze(-1)).squeeze(-1)
         
@@ -166,8 +175,8 @@ class HawkesModel(PPModel):
         assert((T < float('inf')) or (length_limit < float('inf')))
         dev = next(self.parameters()).device
         if marks is None:
-            marks = torch.LongTensor([[]], device=dev)
-            timestamps = torch.FloatTensor([[]], device=dev)
+            marks = torch.tensor([[]], dtype=torch.long, device=dev)
+            timestamps = torch.tensor([[]], torch.float, device=dev)
 
         state = self.forward(marks, timestamps)
         state_values, state_times = state["state_dict"]["state_values"], state["state_dict"]["state_times"]

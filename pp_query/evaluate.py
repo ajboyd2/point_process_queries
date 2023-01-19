@@ -14,6 +14,7 @@ from tqdm import tqdm
 import time
 import datetime
 import random
+import json
 
 from pp_query.utils import print_log
 from pp_query.models import get_model
@@ -34,6 +35,8 @@ def save_results(args, results, suffix=""):
         fp += "/censored_log_likelihood"
     elif args.censored_next_event:
         fp += "/censored_next_event"
+    elif args.sample_sequences:
+        fp += "/sampled_sequences"
 
     folders = fp.split("/")
     for i in range(len(folders)):
@@ -43,10 +46,20 @@ def save_results(args, results, suffix=""):
         if not os.path.exists(intermediate_path):
             os.mkdir(intermediate_path)
     
-    fp += "/results{}{}.pickle".format("_" if suffix != "" else "", suffix)
-    with open(fp, "wb") as f:
-        pickle.dump(results, f)
-    print_log("Saved results at {}".format(fp))
+    if args.sample_sequences:
+        for folder in ["train", "valid", "test"]:
+            target_folder = fp + "/" + folder
+            os.mkdir(target_folder)
+            with open(target_folder + "/" + folder + "_samples.jsonl", "w") as f:
+                for i, seq in enumerate(results):
+                    f.write(json.dumps(seq))
+                    if i != len(results) - 1:
+                        f.write("\n")
+    else:
+        fp += "/results{}{}.pickle".format("_" if suffix != "" else "", suffix)
+        with open(fp, "wb") as f:
+            pickle.dump(results, f)
+        print_log("Saved results at {}".format(fp))
 
 def _setup_hitting_time_query(args, batch, model, num_seqs, use_tqdm=False):
     if args.cuda:
@@ -728,6 +741,31 @@ def _censored_next_event(args, model, dataloader, censor_mark_pct, num_seqs, num
     
     return results
 
+@torch.no_grad()
+def sample_sequences(args, model):
+    file_suffix = datetime.datetime.now().strftime('%m_%d_%Y_%H_%M_%S')
+    results = []
+    print_log("Sampling {} Sequences".format(args.num_queries))
+    sampled_times, sampled_marks, _ = model.batch_sample_points(
+        T=args.sample_T, 
+        left_window=0.0, 
+        timestamps=None, 
+        marks=None,
+        dominating_rate=100.,
+        # mark_mask=mark_mask,
+        censoring=None,
+        num_samples=args.num_queries,
+        proposal_batch_size=args.proposal_batch_size,
+    )
+    print_log("Saving {} Sequences".format(args.num_queries))
+    for t, m in zip(sampled_times, sampled_marks):
+        for i in range(t.shape[0]):
+            keep_mask = t[i, :] <= args.sample_T
+            results.append({"user": len(results), "T": args.sample_T, "times": t[i, keep_mask].tolist(), "marks": m[i, keep_mask].tolist()})
+
+    save_results(args, results, file_suffix)
+    return results
+
 def main():
     print_log("Getting arguments.")
     args = get_args()
@@ -772,6 +810,8 @@ def main():
             censored_log_likelihood(args, model, valid_dataloader, partial_res)
         elif args.censored_next_event:
             censored_next_event(args, model, valid_dataloader, partial_res)
+        elif args.sample_sequences:
+            sample_sequences(args, model)
     
 
 

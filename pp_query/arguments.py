@@ -90,6 +90,9 @@ def evaluation_args(parser):
     group.add_argument("--censored_log_likelihood", action="store_true", help="Perform censored log likelihood experiments.")
     group.add_argument("--censored_next_event", action="store_true", help="Perform censored log likelihood experiments.")
     group.add_argument("--censored_mark_pcts", nargs="+", type=float, default=[0.2, 0.4, 0.5, 0.6, 0.8], help="List of percentages to randomly censor marks in sequences for censoring experiments.")
+    group.add_argument("--sample_sequences", action="store_true", help="Sample sequences and store them.")
+    group.add_argument("--sample_T", type=float, default=50., help="Window length to sample sequences.")
+    group.add_argument("--force_num_channels", type=int, default=None, help="Override automatic vocabulary determination.")
 
 
 def sampling_args(parser):

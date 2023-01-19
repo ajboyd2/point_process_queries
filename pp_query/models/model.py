@@ -378,8 +378,8 @@ class PPModel(nn.Module):
         if dominating_rate is None:
             dominating_rate = self.dominating_rate
         if marks is None:
-            marks = torch.LongTensor([[]], device=next(self.parameters()).device)
-            timestamps = torch.FloatTensor([[]], device=next(self.parameters()).device)
+            marks = torch.tensor([[]], dtype=torch.long, device=next(self.parameters()).device)
+            timestamps = torch.tensor([[]], dtype=torch.float, device=next(self.parameters()).device)
         if isinstance(left_window, torch.Tensor):
             left_window = left_window.item()
         if isinstance(T, torch.Tensor):

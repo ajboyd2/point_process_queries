@@ -202,6 +202,8 @@ def get_data(args):
         is_test=False,
     )
     args.num_channels = train_dataset.vocab_size
+    if args.force_num_channels is not None:
+        args.num_channels = args.force_num_channels
 
     train_dataloader = DataLoader(
         dataset=train_dataset,
