@@ -176,7 +176,7 @@ class HawkesModel(PPModel):
         dev = next(self.parameters()).device
         if marks is None:
             marks = torch.tensor([[]], dtype=torch.long, device=dev)
-            timestamps = torch.tensor([[]], torch.float, device=dev)
+            timestamps = torch.tensor([[]], dtype=torch.float, device=dev)
 
         state = self.forward(marks, timestamps)
         state_values, state_times = state["state_dict"]["state_values"], state["state_dict"]["state_times"]
