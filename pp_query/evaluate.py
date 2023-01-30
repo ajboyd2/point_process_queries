@@ -34,7 +34,10 @@ def save_results(args, results, suffix=""):
     elif args.censored_log_likelihood:
         fp += "/censored_log_likelihood"
     elif args.censored_next_event:
-        fp += "/censored_next_event"
+        if args.predict_use_samples:
+            fp += "/censored_next_event_sample"
+        else:
+            fp += "/censored_next_event"
     elif args.sample_sequences:
         fp += "/sampled_sequences"
 
@@ -687,6 +690,7 @@ def _censored_next_event(args, model, dataloader, censor_mark_pct, num_seqs, num
         "num_int_pts": num_int_pts,
         "true_time": [],
         "true_mark": [],
+        "last_time": [],
         "naive_time_est": [],
         "naive_mark_dist": [],
         "cen_time_est": [],
@@ -731,13 +735,22 @@ def _censored_next_event(args, model, dataloader, censor_mark_pct, num_seqs, num
             num_integral_pts=num_int_pts,
         )
 
-        single_result = censored_model.future_pred_experiment_pass(
-            uncensored_times=original_times, 
-            uncensored_marks=original_marks, 
-            T=T,
-        )
-        for k,v in single_result.items():
-            results[k].append(v.item() if "dist" not in k else v.cpu().tolist())
+        if args.predict_use_samples:
+            single_result = censored_model.future_pred_experiment_sample_pass(
+                uncensored_times=original_times, 
+                uncensored_marks=original_marks, 
+                T=T,
+                num_sampled_sequences=1024,
+            )
+        else:
+            single_result = censored_model.future_pred_experiment_pass(
+                uncensored_times=original_times, 
+                uncensored_marks=original_marks, 
+                T=T,
+            )
+        if single_result is not None:
+            for k,v in single_result.items():
+                results[k].append(v.item() if "dist" not in k else v.cpu().tolist())
     
     return results
 

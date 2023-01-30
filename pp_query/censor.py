@@ -127,33 +127,54 @@ class CensoredPP:
         self.dominating_rate = 100.
 
     @torch.no_grad()
-    def _generate_supporting_seqs(self, existing_times, existing_marks, max_sample_time):
-        self.censoring.overwrite_with_censored = True
+    def _generate_supporting_seqs(self, existing_times, existing_marks, max_sample_time, censoring=None):
+        if censoring is None:
+            censoring = self.censoring
+        censoring.overwrite_with_censored = True
         sampled_times, sampled_marks, sampled_states = self.base_process.batch_sample_points(
             T=max_sample_time, 
-            left_window=self.censoring.start_time, 
+            left_window=censoring.start_time, 
             timestamps=existing_times.unsqueeze(0), 
             marks=existing_marks.unsqueeze(0),
             dominating_rate=self.dominating_rate,
             # mark_mask=mark_mask,
-            censoring=self.censoring,
+            censoring=censoring,
             num_samples=self.num_sampled_sequences,
             proposal_batch_size=self.proposal_batch_size,
         )
-        self.censoring.overwrite_with_censored = False
+        censoring.overwrite_with_censored = False
         return sampled_times, sampled_marks, sampled_states
 
     @torch.no_grad()
-    def intensity(self, existing_times, existing_marks, eval_times, integrate_results=False, stable_mean=True):
-        assert(eval_times.dim() == 1 and existing_times.dim() == 1 and existing_marks.dim() == 1)
-        censoring_start, censoring_end = self.censoring.start_time, eval_times.max()
-        sampled_times, sampled_marks, sampled_states = self._generate_supporting_seqs(existing_times, existing_marks, censoring_end)
+    def intensity(
+        self, 
+        existing_times, 
+        existing_marks, 
+        eval_times, 
+        integrate_results=False, 
+        stable_mean=True, 
+        sampled_times=None, 
+        sampled_marks=None, 
+        sampled_states=None, 
+        censoring=None,
+    ):
+        assert(eval_times.dim() >= 1 and existing_times.dim() == 1 and existing_marks.dim() == 1)
+        orig_eval_times_shape = eval_times.shape
+        if eval_times.dim() >= 1:
+            eval_times.view(-1)    
+        if censoring is None:
+            censoring = self.censoring        
+        
+        censoring_start, censoring_end = censoring.start_time, eval_times.max()
+        if (sampled_times is None) or (sampled_marks is None) or (sampled_states is None):
+            sampled_times, sampled_marks, sampled_states = self._generate_supporting_seqs(existing_times, existing_marks, censoring_end, censoring=censoring)
         grid_times = torch.linspace(
             0.0 if integrate_results else censoring_start, 
             censoring_end, 
             self.num_integral_pts, 
             device=self.device,
-        ).view(*((1,)*(sampled_times[0].dim()-1)), -1)  # pad beginning dimensions
+        ).view(1, -1)  # pad beginning dimensions
+        # ).view(*((1,)*(sampled_times[0].dim()-1)), -1)  # pad beginning dimensions
 
         all_times = torch.cat((eval_times.unsqueeze(0), grid_times), dim=-1)
         all_sorted_times, all_sorted_indices = all_times.sort(dim=-1)
@@ -164,7 +185,7 @@ class CensoredPP:
 
         for st, sm, ss in zip(sampled_times, sampled_marks, sampled_states):
             padded_all_times = all_sorted_times.expand(*(st.shape[:-1]), -1)  # Match batch dimensions
-            intensity_dict = self.base_process.get_intensity(ss, st, padded_all_times, censoring=self.censoring)
+            intensity_dict = self.base_process.get_intensity(ss, st, padded_all_times, censoring=censoring)
             observed_intensity = intensity_dict["observed_int"]
 
             observed_compensator = torch.cumulative_trapezoid(y=observed_intensity.sum(dim=-1), x=padded_all_times, dim=-1)
@@ -188,13 +209,22 @@ class CensoredPP:
 
         all_estimates = all_sorted_estimates.gather(-2, all_sorted_indices.squeeze(0).unsqueeze(-1).expand(*all_sorted_estimates.shape).argsort(-2))
         eval_estimates = all_estimates[:len(eval_times), :]
-        results = {"intensity": eval_estimates}
+        if len(orig_eval_times_shape) > 1:
+            eval_estimates = eval_estimates.view(*orig_eval_times_shape, -1)
+        results = {
+            "intensity": eval_estimates,
+            "sampled_times": sampled_times,
+            "sampled_marks": sampled_marks,
+            "sampled_states": sampled_states,
+        }
 
         if integrate_results:  # Instead of returning the \lambda(t), return \int_0^t \lambda(s) ds
             all_sorted_int_estimates = torch.cumulative_trapezoid(y=all_sorted_estimates, x=all_sorted_times.squeeze(0), dim=-2)  # -2 due to integrating each mark-specific intensity individually
             all_sorted_int_estimates = F.pad(all_sorted_int_estimates, (0, 0, 1, 0), 'constant', 0.0)
             all_int_estimates = all_sorted_int_estimates.gather(-2, all_sorted_indices.squeeze(0).unsqueeze(-1).expand(*all_sorted_int_estimates.shape).argsort(-2))
             eval_int_estimates = all_int_estimates[:len(eval_times), :]
+            if len(orig_eval_times_shape) > 1:
+                eval_int_estimates = eval_int_estimates.view(*orig_eval_times_shape, -1)
             results["compensator"] = eval_int_estimates
 
         return results
@@ -338,14 +368,19 @@ class CensoredPP:
             device=self.device,
         )
         obs_hist_times, obs_hist_marks = censoring.filter_sequences(times=hist_times, marks=hist_marks)
+        if obs_hist_times.numel() == 0:
+            sampling_time_start = cond_end_time * 0.0
+        else:
+            sampling_time_start = obs_hist_times.max()
         results = {
             "true_time": target_time.squeeze(),
             "true_mark": target_mark.squeeze(),
+            "last_time": sampling_time_start,
         }
 
-        fine_grid_pts = torch.linspace(1e-8, T/100, self.num_integral_pts, device=self.device)
-        medium_grid_pts = torch.linspace(T/100, T/10, self.num_integral_pts, device=self.device)
-        coarse_grid_pts = torch.linspace(T/10, T, self.num_integral_pts, device=self.device)
+        fine_grid_pts = torch.linspace(1e-8, 0.01, self.num_integral_pts, device=self.device)
+        medium_grid_pts = torch.linspace(0.01, 0.1, self.num_integral_pts, device=self.device)
+        coarse_grid_pts = torch.linspace(0.1, 1.0, self.num_integral_pts, device=self.device)
         grid_pts = cond_end_time + (T - cond_end_time) * torch.cat(
             (fine_grid_pts, medium_grid_pts, coarse_grid_pts), 
             dim=-1,
@@ -390,6 +425,7 @@ class CensoredPP:
             eval_times=grid_pts.squeeze(0),
             integrate_results=False,
             stable_mean=True,
+            censoring=censoring,
         )["intensity"].unsqueeze(0)
         future_cen_total_intensity = future_cen_intensity.sum(dim=-1)
         future_cen_compensator = F.pad(
@@ -413,6 +449,101 @@ class CensoredPP:
             x=grid_pts.unsqueeze(-1),
             dim=-2,
         )
+        results["cen_time_est"] = cen_time_est.squeeze()
+        results["cen_mark_dist"] = cen_mark_dist.squeeze()
+
+        return results
+
+    @torch.no_grad()
+    def future_pred_experiment_sample_pass(self, uncensored_times, uncensored_marks, T, num_sampled_sequences):
+        n = uncensored_times.shape[-1]
+        hist_times, target_time = uncensored_times[..., :n//2], uncensored_times[..., n//2].squeeze()
+        hist_marks, target_mark = uncensored_marks[..., :n//2], uncensored_marks[..., n//2].squeeze()
+        cond_end_time = hist_times.max()
+        new_boundaries = [(a, min(b, cond_end_time.item()-1e-8)) for (a,b) in self.censoring.boundaries if a < cond_end_time]  # We want the censoring to end just before the last event being conditioned on
+        censoring = CensoredTimeline(
+            boundaries=new_boundaries,
+            censored_marks=self.censoring.censored_marks[:len(new_boundaries)], 
+            total_marks=self.censoring.total_marks, 
+            relative_start=False, 
+            device=self.device,
+        )
+        obs_hist_times, obs_hist_marks = censoring.filter_sequences(times=hist_times, marks=hist_marks)
+        if obs_hist_times.numel() == 0:
+            sampling_time_start = cond_end_time * 0.0
+        else:
+            sampling_time_start = obs_hist_times.max()
+        results = {
+            "true_time": target_time.squeeze(),
+            "true_mark": target_mark.squeeze(),
+            "last_time": sampling_time_start,
+        }
+        time_delta = results["true_time"] - results["last_time"]
+
+        # Sample from base process
+        base_sample_times, _, base_sample_states = self.base_process.batch_sample_points(
+            length_limit=1 + obs_hist_times.numel(), 
+            left_window=sampling_time_start, 
+            timestamps=obs_hist_times, 
+            marks=obs_hist_marks,
+            num_samples=num_sampled_sequences,
+            proposal_batch_size=self.proposal_batch_size,
+        )
+        naive_time_est, naive_mark_dist = 0, 0
+        for st, ss in zip(base_sample_times, base_sample_states):
+            mark_intensities = self.base_process.get_intensity(
+                state_values=ss, 
+                state_times=st, 
+                timestamps=st, 
+                marks=None, 
+                state_marks=None, 
+                mark_mask=1.0, 
+                censoring=None,
+            )["all_mark_intensities"][:, -1, :]
+            mark_probs = F.normalize(input=mark_intensities, p=1, dim=-1)
+            naive_mark_dist += mark_probs.sum(dim=0) / num_sampled_sequences
+            naive_time_est += st[:, -1].sum(dim=0) / num_sampled_sequences
+        results["naive_time_est"] = naive_time_est.squeeze()
+        results["naive_mark_dist"] = naive_mark_dist.squeeze()
+
+        # Sample from censored process
+        sample_shape = (num_sampled_sequences, self.num_integral_pts//32)
+        candidate_times = results["last_time"] + torch.zeros(sample_shape, device=self.device)
+        candidate_dist = torch.distributions.Exponential(self.num_integral_pts / time_delta)
+        batch_idx = torch.arange(num_sampled_sequences).to(self.device)
+
+        cen_intensity_dict = {}
+        cen_time_est, cen_mark_dist = 0, 0
+        while candidate_times.shape[0] > 0:
+            candidate_times = candidate_times.max(dim=-1, keepdim=True).values + candidate_dist.sample(candidate_times.shape).cumsum(dim=-1)
+            cen_intensity_dict = self.intensity(
+                existing_times=obs_hist_times.squeeze(0),
+                existing_marks=obs_hist_marks.squeeze(0),
+                eval_times=candidate_times.view(-1),
+                integrate_results=False,
+                stable_mean=True,
+                sampled_times=cen_intensity_dict.get("sampled_times", None),
+                sampled_marks=cen_intensity_dict.get("sampled_marks", None),
+                sampled_states=cen_intensity_dict.get("sampled_states", None),
+                censoring=censoring,
+            )
+            cen_intensity = cen_intensity_dict["intensity"].view(*candidate_times.shape, -1)
+            cen_mark_probs = F.normalize(input=cen_intensity, p=1, dim=-1)
+            acceptances = torch.rand_like(candidate_times) <= (cen_intensity.sum(dim=-1) / candidate_dist.rate)
+            completed_seqs = acceptances.any(dim=-1)
+
+            if completed_seqs.any():
+                event_idx = acceptances.int().argmax(dim=-1)
+                accepted_times = candidate_times[batch_idx, event_idx]
+                
+                cen_time_est += accepted_times[completed_seqs].sum() / num_sampled_sequences
+                cen_mark_dist += cen_mark_probs[batch_idx, event_idx, :][completed_seqs, :].sum(dim=0) / num_sampled_sequences
+
+                candidate_times = candidate_times[~completed_seqs, :]
+                batch_idx = batch_idx[:candidate_times.shape[0]]
+
+            candidate_dist.rate /= 1.1  # Decrease rate to go further into the future with less iterations 
+        
         results["cen_time_est"] = cen_time_est.squeeze()
         results["cen_mark_dist"] = cen_mark_dist.squeeze()
 
