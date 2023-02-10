@@ -341,6 +341,7 @@ class PPModel(nn.Module):
         adapt_dom_rate=True,
         stop_marks=None,
         censoring=None,
+        verbose=False,
     ):
         dyn_dom_buffer = self.dyn_dom_buffer
         if num_samples > MAX_SAMPLE_BATCH_SIZE:  # Split into batches
@@ -364,6 +365,7 @@ class PPModel(nn.Module):
                     adapt_dom_rate=adapt_dom_rate,
                     stop_marks=stop_marks,
                     censoring=censoring,
+                    verbose=verbose,
                 )
                 remaining_samples -= current_batch_size
                 resulting_times.extend(sampled_times)
@@ -442,6 +444,9 @@ class PPModel(nn.Module):
                 if batch_idx.numel() == 0:
                     break  # STOP SAMPLING
 
+            if verbose:
+                print("Iter {} | Num Seqs Left {} / {}".format(j, new_times.shape[0], num_samples))
+
             if calculate_mark_mask:
                 mark_mask = self.determine_mark_mask(new_times, sample_lens, mask_dict)
 
@@ -489,7 +494,7 @@ class PPModel(nn.Module):
                 else:
                     logits = sample_intensities["all_log_mark_intensities"][batch_idx, event_idx, :].unsqueeze(-2)
                 mark_probs = F.softmax(logits, -1)
-                mark_dist = torch.distributions.Categorical(mark_probs)
+                mark_dist = torch.distributions.Categorical(mark_probs, validate_args=False)
                 new_mark = mark_dist.sample()
 
                 # Need to store sampled events into timestamps and marks

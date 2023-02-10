@@ -2,7 +2,7 @@ import torch
 
 from pp_query.modules import PPDecoder, HawkesDecoder, RMTPPDecoder, TemporalEmbedding
 from pp_query.models.model import PPModel
-from pp_query.models.hawkes import HawkesModel
+from pp_query.models.hawkes import HawkesModel, SelfCorrectingModel
 
 def get_model(
     channel_embedding_size,

@@ -56,7 +56,8 @@ def training_args(parser):
 def evaluation_args(parser):
     group = parser.add_argument_group("Evaluation specification arguments.")
     group.add_argument("--valid_data_path", nargs="+", type=str, default=["./data/1_pp/validation.pickle"], help="Path to validation data file.")
-    group.add_argument("--test_data_path", nargs="+", type=str, default=["./data/1_pp/validation.pickle"], help="Path to testing data file.")
+    group.add_argument("--test_data_path", nargs="+", type=str, default=None, help="Path to testing data file.")
+    group.add_argument("--valid_to_test_pct", type=float, default=0.3, help="Percentage of held out data to be used for validation, rest is used for testing at the end.")
     group.add_argument("--valid_epochs", type=int, default=5, help="Frequency of training epochs to perform validation.")
     group.add_argument("--top_k", type=int, default=0, help="Enables top_k sampling for marks.")
     group.add_argument("--top_p", type=float, default=0.0, help="Enables top_p sampling for marks.")
@@ -94,7 +95,7 @@ def evaluation_args(parser):
     group.add_argument("--sample_sequences", action="store_true", help="Sample sequences and store them.")
     group.add_argument("--sample_T", type=float, default=50., help="Window length to sample sequences.")
     group.add_argument("--force_num_channels", type=int, default=None, help="Override automatic vocabulary determination.")
-
+    group.add_argument("--censor_all_marks", action="store_true", help="Censor all marks over the censoring interval and vary the time window for experiments.")
 
 def sampling_args(parser):
     group = parser.add_argument_group("Sampling specification arguments.")

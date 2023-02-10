@@ -5,6 +5,8 @@ import matplotlib
 import matplotlib.lines as mlines
 import matplotlib.pyplot as plt
 import seaborn as sns
+import statsmodels.api as sm
+from matplotlib.ticker import MultipleLocator, PercentFormatter
 matplotlib.rc('font', family='serif')
 matplotlib.rc('text', usetex=True)
 
@@ -40,24 +42,44 @@ def flatten(t):
     return [item for sublist in t for item in sublist]
 
 log_likelihood_fps = [
-   ("MovieLens", "./data/movie/nhp_models/censored_log_likelihood/results_01_15_2023_16_17_06.pickle"),#"./data/movie/nhp_models/censored_log_likelihood/movie_censored_log_likelihood_results.pickle"),
+#   ("MovieLens", "./data/movie/nhp_models/censored_log_likelihood/results_01_15_2023_16_17_06.pickle"),#"./data/movie/nhp_models/censored_log_likelihood/movie_censored_log_likelihood_results.pickle"),
    #("MOOC", "./data/mooc/nhp_models/censored_log_likelihood/results_01_15_2023_16_17_22.pickle"), #"./data/mooc/nhp_models/censored_log_likelihood/mooc_censored_log_likelihood_results.pickle"), 
    # Real Data ^^ Sampled Data vv
    #("MOOC", "./data/mooc/nhp_models/censored_log_likelihood/results_01_17_2023_13_09_34.pickle"),
 #    ("MOOC", "./data/mooc/nhp_models/censored_log_likelihood/results_01_19_2023_15_43_21.pickle"),
-   ("MOOC", "./data/mooc/nhp_models/censored_log_likelihood/results_01_23_2023_20_26_45.pickle"),
+#   ("MOOC", "./data/mooc/nhp_models/censored_log_likelihood/results_01_23_2023_20_26_45.pickle"),
    ("Taobao", "./data/taobao/nhp_models/censored_log_likelihood/taobao_censored_log_likelihood_results.pickle"),
+   ("Reddit", "./data/reddit/nhp_models/censored_log_likelihood/results_02_05_2023_12_53_14.pickle"), #"./data/reddit/nhp_models/censored_log_likelihood/results_02_05_2023_00_52_54.pickle"),
+   ("MemeTracker", "./data/meme/nhp_models/censored_log_likelihood/results_02_04_2023_22_46_17.pickle"),
+   ("Email", "./data/email/nhp_models/censored_log_likelihood/results_02_04_2023_22_45_45.pickle"),
 ]
 
 next_event_fps = [
     # ("MovieLens", "./data/movie/nhp_models/censored_next_event/results_01_15_2023_19_17_43.pickle"),#"./data/movie/nhp_models/censored_next_event/movie_censored_next_event_results.pickle"),
-    ("MovieLens", "./data/movie/nhp_models/censored_next_event/results_01_30_2023_00_22_03.pickle"),
+#    ("MovieLens", "./data/movie/nhp_models/censored_next_event/results_01_30_2023_00_22_03.pickle"),
     # ("MOOC", "./data/mooc/nhp_models/censored_next_event/mooc_censored_next_event_results.pickle"),
-    ("MOOC", "./data/mooc/nhp_models/censored_next_event/results_01_30_2023_00_21_56.pickle"),
+#    ("MOOC", "./data/mooc/nhp_models/censored_next_event/results_01_30_2023_00_21_56.pickle"),
     # ("Taobao", "./data/taobao/nhp_models/censored_next_event/taobao_censored_next_event_results.pickle"),
     ("Taobao", "./data/taobao/nhp_models/censored_next_event/results_01_30_2023_00_20_38.pickle"),
+    ("Reddit", "./data/reddit/nhp_models/censored_next_event/results_02_05_2023_14_07_25.pickle"), #"./data/reddit/nhp_models/censored_next_event/results_02_05_2023_02_12_10.pickle"),
+    ("MemeTracker", "./data/meme/nhp_models/censored_next_event/results_02_05_2023_00_03_40.pickle"),
+    ("Email", "./data/email/nhp_models/censored_next_event/results_02_04_2023_23_07_54.pickle"),
 ]
 real_data = True
+total_censoring = False
+if total_censoring:
+    # Total Censoring vvv
+    log_likelihood_fps = [
+        ("MovieLens", "./data/movie/nhp_models/censored_log_likelihood/results_02_03_2023_02_09_05.pickle"),
+        ("MOOC", "./data/mooc/nhp_models/censored_log_likelihood/results_02_03_2023_02_09_06.pickle"),
+        ("Taobao", "./data/taobao/nhp_models/censored_log_likelihood/results_02_03_2023_02_09_00.pickle"),
+    ]
+    # Temp next event results
+    next_event_fps = [
+        ("MovieLens", "./data/movie/nhp_models/censored_next_event/results_01_30_2023_21_49_15.pickle"),
+        ("MOOC", "./data/mooc/nhp_models/censored_next_event/results_01_30_2023_19_19_38.pickle"),
+        ("Taobao", "./data/taobao/nhp_models/censored_next_event/results_01_31_2023_03_35_54.pickle"),
+    ]
 
 sample_log_likelihood_fps = [
     ("MovieLens", "./data/movie/nhp_models/censored_log_likelihood/results_01_30_2023_17_10_55.pickle"),
@@ -71,9 +93,9 @@ sample_next_event_fps = [
     ("Taobao", "./data/taobao/nhp_models/censored_next_event/results_01_31_2023_03_35_54.pickle"),
 ]
 
-real_data = False
-log_likelihood_fps = sample_log_likelihood_fps
-next_event_fps = sample_next_event_fps
+# real_data = False
+# log_likelihood_fps = sample_log_likelihood_fps
+# next_event_fps = sample_next_event_fps
 
 dir_prefix = "/home/alexjb/source/point_process_queries"
 
@@ -88,143 +110,160 @@ def read_real_data_results(fp, dataset):
         "dataset": dataset,
     })
     
-
-def plot_res(ax, args, res, is_first, is_last, kind, metric, legend=False):
-    assert(kind in ("log_likelihood", "time", "mark"))
-    # if is_first: #"dataset" in res:
-    if "dataset" in res:
-        ax.annotate(r"\textbf{" + res.dataset + r"}", xy=(0.5, 0.9), fontsize=Y_LABEL_FS, ha='center', xycoords='axes fraction')
-
-
-    ax.set_yscale(args.yscale)
-    ax.set_xscale(args.xscale)
-    if is_first:
-        ax.set_title(args.title, fontsize=TITLE_FS)
-    if is_last:
-        ax.set_xlabel(args.xlabel, fontsize=X_LABEL_FS)
+def format_ax(ax, args, left, top, bottom):
+    if not args.full_border:
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+    
+    if "title" in args and top:
+        ax.set_title(args.title.format(**args), fontsize=TITLE_FS)
+    if left:
+        ax.set_ylabel(args.ylabel, fontsize=Y_LABEL_FS)
+        ax.yaxis.set_label_coords(args.ylabel_pad, 0.5)  # Reduce some padding from label to ticks
     else:
-        ax.set_xticklabels([])
+        ax.set_ylabel("")
+    if bottom:
+        ax.set_xlabel(args.xlabel, fontsize=X_LABEL_FS)
+        ax.tick_params(which="both", top=True, labeltop=True, bottom=False, labelbottom=False, left=False, labelleft=False)
+        ax.tick_params(axis="x", pad=0.5)
+        ax.spines['bottom'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.spines['left'].set_visible(False)
+    else:
+        ax.tick_params(which="both", top=False, labeltop=False, bottom=True, labelbottom=False)
 
-    # if BOLD_YLABEL:
-    #     ylabel = args.ylabel.format(dataset=res.get("dataset", ""))
-    #     ax.set_ylabel(r"\textbf{" + ylabel + r"}", fontsize=Y_LABEL_FS)
-    # else:
-    ax.set_ylabel(args.ylabel, fontsize=Y_LABEL_FS)
-    ax.yaxis.set_label_coords(args.ylabel_pad, 0.5)  # Reduce some padding from label to ticks
+    ax.tick_params(axis="y", pad=2.0)
+
+    if "yscale" in args and args.yscale!="linear":
+        ax.set_yscale(args.yscale)
+    if "xscale" in args and args.xscale!="linear":
+        ax.set_xscale(args.xscale)
+    
     if "xlim" in args:
         ax.set_xlim(*args.xlim)
-
-    colors = ["tab:orange", "tab:blue", "tab:green", "tab:red"]
-
-    if kind == "log_likelihood":
-        pcts = sorted(res["pcts"])
-        original = [np.array(res["results"][pct]["original_ll"]) for pct in pcts]
-        for i, method in enumerate(args.res_keys):
-            method_res = [np.array(res["results"][pct][method]) for pct in pcts]
-            if metric == "avg":
-                method_res = [v.mean() for v in method_res]
-            elif metric == "rel":
-                method_res = [((o - v) / o).mean() for v, o in zip(method_res, original)]
-            ax.plot(pcts, method_res, color=colors[i], label=method.replace("_ll", "").capitalize() if legend else None, linestyle='-', marker='o', markersize=ERR_MARKER_SIZE, clip_on=False)
-    elif kind == "time":
-        pcts = sorted(res["pcts"])
-        true_times = [np.array(res["results"][pct]["true_time"]) for pct in pcts]
-        for i, (method_name, method_key) in enumerate([("Censored", "cen_time_est"), ("Baseline", "naive_time_est")]):
-            method_res = [np.array(res["results"][pct][method_key]) for pct in pcts]
-            # method_res = [((y_hat - y)**2).mean() for y_hat, y in zip(method_res, true_times)]
-            method_res = [np.median(abs(y_hat - y)) for y_hat, y in zip(method_res, true_times)]
-            # method_res = [np.median(abs(y_hat - y) / y) for y_hat, y in zip(method_res, true_times)]
-            ax.plot(pcts, method_res, color=colors[i], label=None, linestyle='-', marker='o', markersize=ERR_MARKER_SIZE, clip_on=False)
-    elif kind == "mark":
-        pcts = sorted(res["pcts"])
-        true_marks = [np.array(res["results"][pct]["true_mark"]) for pct in pcts]
-        for i, (method_name, method_key) in enumerate([("Censored", "cen_mark_dist"), ("Baseline", "naive_mark_dist")]):
-            method_res = [np.array(res["results"][pct][method_key]) for pct in pcts]
-            # method_res = [-np.log(p_y[np.arange(len(y)), y]+1e-4).mean() for p_y, y in zip(method_res, true_marks)]
-            #method_res = [(p_y.argmax(-1) == y).mean() for p_y, y in zip(method_res, true_marks)]
-            all_ranks = [np.argsort(np.argsort(-p_y, axis=-1), axis=-1) for p_y in method_res]
-            ranks = [r[np.arange(len(y)), y] for r, y in zip(all_ranks, true_marks)]
-            k = 10
-            method_res = [(r < k).mean() for r in ranks]
-            ax.plot(pcts, method_res, color=colors[i], label=None, linestyle='-', marker='o', markersize=ERR_MARKER_SIZE, clip_on=False)
-
-        # r = res["results"]
-        # r = {k:np.array(v) if isinstance(v, list) else v for k,v in r.items()}
-        # for i, key in enumerate(args.y_key):
-        #     ax.scatter(r[args.x_key], r[key], color=colors[i], label=key.replace("_ll", "").capitalize() if legend else None, s=EFF_MARKER_SIZE, alpha=0.5, clip_on=True)
-        
-    elif kind == "next_event":
-        pass
-
-    '''
-    if kind == "errs":
-        gt = res["gt"]
-        methods = {
-            r"$\mathrm{Naive}$": np.array([res["est"][k]["naive_est"] for k in res["keys"]]),
-            r"$\mathrm{Imp.}$": np.array([res["est"][k]["is_est"] for k in res["keys"]]),
-        }
-        colors = ["tab:orange", "tab:blue"]
-        if args.plot_bounds:
-            methods[r"$\mathrm{Imp.}_\mathrm{L}$"] = np.array([res["est"][k]["is_lower"] for k in res["keys"]])
-            methods[r"$\mathrm{Imp.}_\mathrm{U}$"] = np.array([res["est"][k]["is_upper"] for k in res["keys"]])
-            colors.extend(["tab:green", "tab:red"])
-        means = {k:(np.abs(v-gt)/gt).mean(axis=-1) for k,v in methods.items()}
-        for i, (method_name, method_mean) in enumerate(means.items()):
-            color = colors[i]
-            ax.plot(res.num_seqs, method_mean, color=color, linestyle='-', marker='o', label=method_name, markersize=ERR_MARKER_SIZE, clip_on=False)    
-    elif kind == "effs":
-        if "precomputed" in res:
-            gt, eff = res["precomputed"]
-            gt, eff = np.array(gt), np.array(eff)
-        else:
-            gt = res["gt"][0, :]
-            naive_var = gt*(1-gt)
-            is_var = res["est"][res.true_last_key]["is_var"]
-            eff = naive_var / is_var
-        ax.scatter(gt[eff <= args.cutoff], eff[eff <= args.cutoff], s=EFF_MARKER_SIZE, alpha=0.5, clip_on=True)
-
-        # Plot Reference Horizontal Lines (for 1.0 Efficiency and Avg. Runtime Ratio)
-        ax.axhline(y=1.0, linestyle="--", color="gray")
-        print(args.title, res.get("dataset", ""), np.median(eff), np.mean(eff))
-        if "est" in res:
-            rt_ratio = res["est"][res.true_last_key]["avg_is_time"] / res["est"][res.true_last_key]["avg_naive_time"]
-            ax.axhline(y=rt_ratio, linestyle=(0, (1, 1)), color='tab:red')
-            ax.text(ax.get_xlim()[-1]*0.95, rt_ratio, "$\\times${:.2f}".format(rt_ratio), ha="right", va="center", size=X_LABEL_FS-2,
-                bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="tab:red", lw=1))
-    elif kind == "runtime":
-        interactions = np.linspace(0.1, 2.0, num=20)
-        query_time_mean = np.array(res["runtime"]).mean(axis=0) / 10
-        df_query_time = pd.DataFrame(query_time_mean, columns = interactions,
-                        index = ['Naive', 'CensoredPP (Exact)', 'CensoredPP (Approx)', 'Importance Sampling'])
-        naive_res = df_query_time.loc['Naive',:]
-        imp_res = df_query_time.loc['Importance Sampling',:]
-        ax.plot(interactions, naive_res, color="tab:orange", linestyle='-', marker='o', label="Naive", markersize=ERR_MARKER_SIZE, clip_on=False) 
-        ax.plot(interactions, imp_res, color="tab:blue", linestyle='-', marker='o', label="Imp.", markersize=ERR_MARKER_SIZE, clip_on=False) 
-    '''
-
     if "ylim" in args:
         ax.set_ylim(*args.ylim)
-    if "scale_ylim" in args:
-        ax.set_ylim(ax.get_ylim()[0], ax.get_ylim()[-1]*args.scale_ylim)
+    if args.get("flip_y", False):
+        ax.set_ylim(*ax.get_ylim()[::-1])
 
-    if legend:
-        ax.legend(loc=args.legend_loc, prop={'size': 8})
+def plot_ll(ax, args, res):
+    colors = ["tab:orange", "tab:blue", "tab:green", "tab:red"]
 
-def plot_experiment_results(args, fps, next_event_fps):
-    ds_names = [n for n,_ in fps]
-    num_ds = len(ds_names)
+    pcts = sorted(res["pcts"])
+
+    censored, baseline, num_censored_marks = [], [], []
+    for pct in pcts:
+        censored.extend(res["results"][pct]["censored_ll"])
+        baseline.extend(res["results"][pct]["baseline_ll"])
+        num_censored_marks.extend(res["results"][pct]["kept_marks"])
+    censored, baseline, num_censored_marks = np.array(censored), np.array(baseline), np.array(num_censored_marks)
+    response = (censored-baseline) / np.log(10.)
+    ax.plot(num_censored_marks, response, '.', color="tab:blue", alpha=0.4)
+
+    ax.axhline(0, linestyle=':', color="tab:red")
+    lowess = sm.nonparametric.lowess
+    ax.plot(np.sort(num_censored_marks), lowess(response, num_censored_marks, frac=1./3)[:, 1], color="black")
+
+    if res.dataset == "Taobao":
+        ax.set_ylim((-6, 21)) #30))
+        ticks = [-5, 0, 5, 10, 15, 20]#, 30]
+    elif res.dataset == "Reddit":
+        ax.set_ylim((None, 18))
+        ticks = [0, 5, 10, 15]
+    elif res.dataset == "MemeTracker":
+        ax.set_ylim((-8, 18))
+        ticks = [-5, 0, 5, 10, 15] #20]
+    elif res.dataset == "Email":
+        ax.set_ylim((None, 12))
+        ticks = [0, 5, 10]
+    # ax.set_yticks(ticks)
+    # ax.set_yticklabels([r"$10^{" + str(tick) + r"}$" for tick in ticks])
+    ax.yaxis.set_major_locator(MultipleLocator(10))
+    ax.yaxis.set_major_formatter('$10^{{ {x:.0f} }}$')
+    ax.yaxis.set_minor_locator(MultipleLocator(5))
+
+    # print(ax.get_yticks())
+    # print(ax.get_yticklabels())
+
+def plot_time(ax, args, res):
+    colors = ["tab:orange", "tab:blue", "tab:green", "tab:red"]
+
+    pcts = sorted(res["pcts"])
+    true_times = [np.array(res["results"][pct]["true_time"]) for pct in pcts]
+
+    true_times, censored, baseline, num_censored_marks = [], [], [], []
+    for pct in pcts:
+        true_times.extend(res["results"][pct]["true_time"])
+        censored.extend(res["results"][pct]["cen_time_est"])
+        baseline.extend(res["results"][pct]["naive_time_est"])
+        num_censored_marks.extend(res["results"][pct]["kept_marks"])
+    true_times, censored, baseline, num_censored_marks = np.array(true_times), np.array(censored), np.array(baseline), np.array(num_censored_marks)
+
+    sorted_num_censored_marks = np.sort(num_censored_marks)
+    lowess = sm.nonparametric.lowess
+    censored_err = np.abs(true_times - censored)
+    baseline_err = np.abs(true_times - baseline)
+    ax.plot(sorted_num_censored_marks, lowess(censored_err, num_censored_marks)[:, 1], color="tab:orange")
+    ax.plot(sorted_num_censored_marks, lowess(baseline_err, num_censored_marks)[:, 1], color="tab:green")
+    
+
+def plot_mark(ax, args, res, legend=False):
+    colors = ["tab:orange", "tab:blue", "tab:green", "tab:red"]
+
+    pcts = sorted(res["pcts"])
+    true_marks = [np.array(res["results"][pct]["true_mark"]) for pct in pcts]
+    
+    true_marks, censored, baseline, num_censored_marks = [], [], [], []
+    for pct in pcts:
+        true_marks.extend(res["results"][pct]["true_mark"])
+        censored.extend(res["results"][pct]["cen_mark_dist"])
+        baseline.extend(res["results"][pct]["naive_mark_dist"])
+        num_censored_marks.extend(res["results"][pct]["kept_marks"])
+    true_marks, censored, baseline, num_censored_marks = np.array(true_marks), np.array(censored), np.array(baseline), np.array(num_censored_marks)
+
+    all_censored_ranks = np.argsort(np.argsort(-censored, axis=-1), axis=-1)
+    all_baseline_ranks = np.argsort(np.argsort(-baseline, axis=-1), axis=-1)
+    censored_ranks = all_censored_ranks[np.arange(len(true_marks)), true_marks]
+    baseline_ranks = all_baseline_ranks[np.arange(len(true_marks)), true_marks]
+    k = 10
+    censored_thresh = (censored_ranks < k).astype(float)#[(r < k).mean() for r in ranks]
+    baseline_thresh = (baseline_ranks < k).astype(float)#[(r < k).mean() for r in ranks]
+    sorted_num_censored_marks = np.sort(num_censored_marks)
+    lowess = sm.nonparametric.lowess
+
+    ax.plot(sorted_num_censored_marks, lowess(censored_thresh, num_censored_marks)[:, 1], color="tab:orange", label="Censored" if legend else None)
+    ax.plot(sorted_num_censored_marks, lowess(baseline_thresh, num_censored_marks)[:, 1], color="tab:green", label="Baseline" if legend else None)
+
+    ax.yaxis.set_major_locator(MultipleLocator(0.2))
+    ax.yaxis.set_major_formatter('{x:.1f}')
+    ax.yaxis.set_minor_locator(MultipleLocator(0.1))
+
+def plot_density(ax, args, res):
+    pcts = sorted(res["pcts"])
+
+    num_censored_marks = []
+    for pct in pcts:
+        num_censored_marks.extend(res["results"][pct]["kept_marks"])
+    num_censored_marks = np.array(num_censored_marks)
+
+    sns.kdeplot(x=num_censored_marks, cut=0, ax=ax, fill=True, log_scale=args.xscale=="log")
+ 
+def plot_ll_results(args, fpd):
+    datasets = {n: read_real_data_results(fp, n) for n, fp in fpd}
+    num_ds = len(datasets)
 
     plot_configs = []
-    for i,n in enumerate(ds_names):
-        plot_configs.append(["{}_avg".format(n), "gap_c_{}_1".format(i), "{}_time".format(n), "gap_c_{}_2".format(i), "{}_mark".format(n)])
-        plot_configs.append(["gap_r_{}".format(i)]*5)
+    for i,n in enumerate(datasets.keys()):
+        plot_configs.append(["{}_ll".format(n), "gap_r_{}".format(i), "{}_density".format(n)])
+        plot_configs.append(["gap_c_{}".format(i)]*3)
     plot_configs = plot_configs[:-1]  # Don't need last padded row
+    plot_configs = list(map(list, zip(*plot_configs)))  # Transpose list as it was built by column instead of by row
 
+    w = FULL_PLOT_WIDTH
+    gap_pct, plot_pct = 0.18 / num_ds, 0.82 / num_ds
     gs_kw = {
-        "height_ratios": ([PLOT_HEIGHT_MID, PLOT_HEIGHT_GAP]*num_ds)[:-1],
-        # "width_ratios": [HALF_PLOT_WIDTH, HALF_PLOT_WIDTH_GAP, HALF_PLOT_WIDTH], #[HALF_PLOT_WIDTH, HALF_PLOT_WIDTH_GAP, HALF_PLOT_WIDTH],
-        "width_ratios": [THIRD_PLOT_WIDTH, THIRD_PLOT_GAP, THIRD_PLOT_WIDTH, THIRD_PLOT_GAP, THIRD_PLOT_WIDTH], #[HALF_PLOT_WIDTH, HALF_PLOT_WIDTH_GAP, HALF_PLOT_WIDTH],
-        # "width_ratios": [FULL_PLOT_WIDTH], #[HALF_PLOT_WIDTH, HALF_PLOT_WIDTH_GAP, HALF_PLOT_WIDTH],
+        "height_ratios": [PLOT_HEIGHT_SHORT*0.9, PLOT_HEIGHT_GAP*1.25, PLOT_HEIGHT_SHORT*0.4],
+        "width_ratios": ([w*plot_pct, w*gap_pct]*num_ds)[:-1],
     }
 
     fig_height, fig_width = sum(gs_kw["height_ratios"]), sum(gs_kw["width_ratios"])
@@ -233,33 +272,22 @@ def plot_experiment_results(args, fps, next_event_fps):
         gridspec_kw=gs_kw,
         figsize=(fig_width, fig_height),
         constrained_layout=True,
+        sharex=False,
     )
 
     for k, ax in axd.items():
         if k.startswith('gap_'):
             ax.set_visible(False)
 
-    for i, (n, fp) in enumerate(fps):
-        res = read_real_data_results(fp, n)
-        #ax_avg, ax_rel = axd["{}_avg".format(n)], axd["{}_rel".format(n)]
-        ax_avg = axd["{}_avg".format(n)]
-        sub_args = args.ll
-        plot_res(ax_avg, sub_args, res, is_first=i==0, is_last=i==len(fps)-1, kind="log_likelihood", metric="avg", legend=i==args.ll.legend_id)
-        #plot_res(ax_rel, sub_args, res, is_first=i==0, is_last=i==len(fps)-1, kind=kind, metric="rel")
-
-    for i, (n, fp) in enumerate(next_event_fps):
-        res = read_real_data_results(fp, n)
-        #ax_avg, ax_rel = axd["{}_avg".format(n)], axd["{}_rel".format(n)]
-        ax_time = axd["{}_time".format(n)]
-        sub_args = args.ne_t
-        plot_res(ax_time, sub_args, res, is_first=i==0, is_last=i==len(next_event_fps)-1, kind="time", metric="mse", legend=i==args.ll.legend_id)
-        ax_mark = axd["{}_mark".format(n)]
-        sub_args = args.ne_m
-        plot_res(ax_mark, sub_args, res, is_first=i==0, is_last=i==len(next_event_fps)-1, kind="mark", metric="ce", legend=i==args.ll.legend_id)
-
-    for ax in axd.values():
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
+    for i, (name, data) in enumerate(datasets.items()):
+        args.ll.dataset, args.density.dataset = name, name
+        ax_ll, ax_density = axd["{}_ll".format(name)], axd["{}_density".format(name)]
+        plot_ll(ax=ax_ll, args=args.ll, res=data)
+        plot_density(ax=ax_density, args=args.density, res=data)
+        
+        format_ax(ax=ax_ll, args=args.ll, left=i==0, top=True, bottom=False)
+        format_ax(ax=ax_density, args=args.density, left=i==0, top=False, bottom=True)
+        ax_density.set_xlim(*ax_ll.get_xlim())
 
     fig.subplots_adjust(
         left   = 0.0,  # the left side of the subplots of the figure
@@ -272,24 +300,53 @@ def plot_experiment_results(args, fps, next_event_fps):
 
     fig.savefig(args.dest_path, bbox_inches="tight", transparent=True)
 
-    all_res = {n: read_real_data_results(fp, n) for n, fp in fps}
-    pcts = [0.2, 0.5, 0.8]
 
- 
-def plot_synth_results(args, fpd):
-    data = {k:pickle.load(open(v,"rb")) for k,v in fpd.items()}
+def plot_next_event_results(args, fpd):
+    datasets = {n: read_real_data_results(fp, n) for n, fp in fpd}
+    num_ds = len(datasets)
 
-    fig_width, fig_height = FULL_PLOT_WIDTH, PLOT_HEIGHT_MID
-    fig, ax = plt.subplots(
-        1, 1,
+    plot_configs = []
+    for i,n in enumerate(datasets.keys()):
+        plot_configs.append(["{}_time".format(n), "gap_r_{}".format(i), "{}_mark".format(n), "gap_r2_{}".format(i), "{}_density".format(n)])
+        plot_configs.append(["gap_c_{}".format(i)]*5)
+    plot_configs = plot_configs[:-1]  # Don't need last padded row
+    plot_configs = list(map(list, zip(*plot_configs)))  # Transpose list as it was built by column instead of by row
+
+    w = FULL_PLOT_WIDTH
+    gap_pct, plot_pct = 0.18 / num_ds, 0.82 / num_ds
+    gs_kw = {
+        "height_ratios": [PLOT_HEIGHT_SHORT*0.75, PLOT_HEIGHT_GAP*0.5, PLOT_HEIGHT_SHORT*0.75, PLOT_HEIGHT_GAP*1.25, PLOT_HEIGHT_SHORT*0.4],
+        "width_ratios": ([w*plot_pct, w*gap_pct]*num_ds)[:-1],
+    }
+
+    fig_height, fig_width = sum(gs_kw["height_ratios"]), sum(gs_kw["width_ratios"])
+    fig, axd = plt.subplot_mosaic(
+        plot_configs,
+        gridspec_kw=gs_kw,
         figsize=(fig_width, fig_height),
         constrained_layout=True,
+        sharex=False,
     )
 
-    plot_res(ax, args.runtime, {"runtime": data["runtime"]}, is_first=True, is_last=True, kind="runtime", legend=True)
+    for k, ax in axd.items():
+        if k.startswith('gap_'):
+            ax.set_visible(False)
 
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
+    for i, (name, data) in enumerate(datasets.items()):
+        args.time.dataset, args.mark.dataset, args.density.dataset = name, name, name
+        ax_time, ax_mark, ax_density = axd["{}_time".format(name)], axd["{}_mark".format(name)], axd["{}_density".format(name)]
+        plot_time(ax=ax_time, args=args.time, res=data)
+        plot_mark(ax=ax_mark, args=args.mark, res=data, legend=i==0)
+        plot_density(ax=ax_density, args=args.density, res=data)
+        
+        format_ax(ax=ax_time, args=args.time, left=i==0, top=True, bottom=False)
+        format_ax(ax=ax_mark, args=args.mark, left=i==0, top=False, bottom=False)
+        format_ax(ax=ax_density, args=args.density, left=i==0, top=False, bottom=True)
+        ax_mark.set_xlim(*ax_time.get_xlim())
+        ax_density.set_xlim(*ax_time.get_xlim())
+
+        if i == 0:
+            ax_mark.legend(loc="lower left", prop={'size': 7})
 
     fig.subplots_adjust(
         left   = 0.0,  # the left side of the subplots of the figure
@@ -300,71 +357,58 @@ def plot_synth_results(args, fpd):
         hspace = 0.0,   # the amount of height reserved for white space between subplots
     )
 
-    fig.savefig(args.runtime.dest_path, bbox_inches="tight", transparent=True)
+    fig.savefig(args.dest_path, bbox_inches="tight", transparent=True)
 
-    fig_width, fig_height = FULL_PLOT_WIDTH, PLOT_HEIGHT_SHORT
-    fig, ax = plt.subplots(
-        1, 1,
-        figsize=(fig_width, fig_height),
-        constrained_layout=True,
-    )
-    plot_res(ax, args.eff, {"precomputed": (data["probs"], data["effs"])}, is_first=True, is_last=True, kind="effs", legend=False)
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
 
-    fig.subplots_adjust(
-        left   = 0.0,  # the left side of the subplots of the figure
-        right  = 1.0,    # the right side of the subplots of the figure
-        bottom = 0.0,   # the bottom of the subplots of the figure
-        top    = 1.0,      # the top of the subplots of the figure
-        wspace = 0.0,   # the amount of width reserved for blank space between subplots
-        hspace = 0.0,   # the amount of height reserved for white space between subplots
-    )
-
-    fig.savefig(args.eff.dest_path, bbox_inches="tight", transparent=True)
 
 if __name__ == "__main__":
-    hit_args = dotdict({
+    ll_args = dotdict({
         "ll": dotdict({
-            "title": "\\textbf{(a)} Mean Log\nLikelihood",
-            "xlabel": r"",#Mark Censoring Percentage",
-            "ylabel": r"Log $\mathcal{L}(\underline{\mathcal{H}})$",
-            "res_keys": ["censored_ll", "baseline_ll", "naive_ll", "original_ll"],
-            # "ylabel": "{dataset}", #r"Mean RAE",
-            # "xlim": (1.5, 1000*1.1),
-            # "ylim": (0.01, 1.75),
+            "title": "{dataset}",
+            "xlabel": "",
+            "ylabel": "Likelihood Ratio",
             "yscale": 'linear',
-            "xscale": "linear",
-            "plot_bounds": False,
-            "legend_id": 2,
-            "legend_loc": "upper left",
-            "ylabel_pad": -0.2,#-0.28,
+            "xscale": "log",
+            "ylabel_pad": -0.25,
+            "full_border": False,
         }),
-        "ne_t": dotdict({
-            "title": "\\textbf{(b)} Median Absolute Error for\nNext Time Prediction",
-            "xlabel": r"Mark Censoring Percentage",#Ground Truth Prob.",
-            # "ylabel": "", #r"Rel. Eff.", #r"$\mathrm{eff}(\hat{\pi}_{\mathrm{Imp.}}, \hat{\pi}_{\mathrm{Naive}})$",
-            "ylabel": r"Med. AE", #r"$\mathrm{eff}(\hat{\pi}_{\mathrm{Imp.}}, \hat{\pi}_{\mathrm{Naive}})$",
-            # "xlim": (0.0, 1.0),
-            "yscale": 'linear',
-            "xscale": "linear",
-            "ylabel_pad": -0.21,
-            # 'cutoff': 1e6,
+        "density": dotdict({
+            "xlabel": r"\# Marks Censored",
+            "ylabel": "Density",
+            "yscale": "linear",
+            "xscale": "log",
+            "ylabel_pad": -0.05,
+            "full_border": True,
+            "ylim": (0, None),
+            "flip_y": True,
         }),
-        "ne_m": dotdict({
-            "title": "\\textbf{(c)} Top-10 Accuracy for\nNext Mark Prediction",
-            "xlabel": r"",#Ground Truth Prob.",
-            # "ylabel": "", #r"Rel. Eff.", #r"$\mathrm{eff}(\hat{\pi}_{\mathrm{Imp.}}, \hat{\pi}_{\mathrm{Naive}})$",
-            "ylabel": r"Acc@10", #r"$\mathrm{eff}(\hat{\pi}_{\mathrm{Imp.}}, \hat{\pi}_{\mathrm{Naive}})$",
-            #"xlim": (0.0, 1.0),
-            "yscale": 'linear',
-            "xscale": "linear",
-            "ylabel_pad": -0.21,
-            # 'cutoff': 1e6,
-        }),
-        "dest_path": dir_prefix + "/data/plots/{}_censored_log_likelihood_plots.pdf".format("real" if real_data else "sampled"),
+        "dest_path": dir_prefix + "/data/plots/final_plots/log_likelihood_plots.pdf",
     })
-    plot_experiment_results(hit_args, log_likelihood_fps, next_event_fps)
+    next_event_args = dotdict({
+        "time": dotdict({
+            "title": "{dataset}",
+            "xlabel": "",
+            "ylabel": r"Mean AE",
+            "yscale": 'linear',
+            "xscale": "log",
+            "ylabel_pad": -0.21,
+            "full_border": False,
+        }),
+        "mark": dotdict({
+            "xlabel": "",
+            "ylabel": r"Acc@10",
+            "yscale": 'linear',
+            "xscale": "log",
+            "ylim": (0, 0.85),
+            "ylabel_pad": -0.21,
+            "full_border": False,
+        }),
+        "density": ll_args.density,
+        "dest_path": dir_prefix + "/data/plots/final_plots/next_event_plots.pdf",
+    })
+    # plot_experiment_results(hit_args, log_likelihood_fps, next_event_fps)
+    plot_ll_results(ll_args, log_likelihood_fps)
+    plot_next_event_results(next_event_args, next_event_fps)
 
 
 

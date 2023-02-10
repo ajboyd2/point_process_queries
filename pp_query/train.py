@@ -204,6 +204,7 @@ def get_data(args):
     args.num_channels = train_dataset.vocab_size
     if args.force_num_channels is not None:
         args.num_channels = args.force_num_channels
+    print_log("NUM CHANNELS: {}".format(args.num_channels))
 
     train_dataloader = DataLoader(
         dataset=train_dataset,
@@ -222,7 +223,7 @@ def get_data(args):
         valid_dataset = PointPatternDataset(
             file_path=args.valid_data_path, 
             args=args, 
-            keep_pct=1.0, 
+            keep_pct=1.0 if args.test_data_path is not None else args.valid_to_test_pct, 
             set_dominating_rate=False,
             is_test=False,
         )
@@ -238,9 +239,9 @@ def get_data(args):
         print_log("Loaded {} / {} validation examples / batches from {}".format(len(valid_dataset), len(valid_dataloader), args.valid_data_path))
 
         test_dataset = PointPatternDataset(
-            file_path=args.test_data_path, 
+            file_path=args.test_data_path if args.test_data_path is not None else args.valid_data_path, 
             args=args, 
-            keep_pct=1.0,  # object accounts for the test set having (1 - valid_to_test_pct) amount
+            keep_pct=1.0 if args.test_data_path is not None else args.valid_to_test_pct,  # object accounts for the test set having (1 - valid_to_test_pct) amount
             set_dominating_rate=False,
             is_test=True,
         )

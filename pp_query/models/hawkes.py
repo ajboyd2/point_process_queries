@@ -225,3 +225,68 @@ class HawkesModel(PPModel):
                 last_time = new_times.max()
         
         return (timestamps, marks)
+
+class SelfCorrectingModel(HawkesModel):
+
+    def get_intensity(self, state_values, state_times, timestamps, marks=None, state_marks=None, mark_mask=1.0, from_right=False, censoring=None):
+        """Given a set of hidden states, timestamps, and latent_state get a tensor representing intensity values at timestamps.
+        Specify marks to get intensity values for specific channels."""
+
+        if (state_values is None) and (state_marks is not None):
+            state_values = self.get_states(state_marks, state_times)["state_values"]
+
+        batch_size, seq_len = timestamps.shape
+        hist_len = state_times.shape[1]
+        num_marks = self.num_marks
+
+        mu, alpha, delta = self.mus, self.alphas(state_values), self.deltas(state_values)
+
+        mu = mu.unsqueeze(0).unsqueeze(0).expand(batch_size, seq_len, -1)
+        alpha = torch.transpose(alpha.unsqueeze(-1).expand(-1, -1, -1, seq_len), 1, 3).contiguous()
+        delta = torch.transpose(delta.unsqueeze(-1).expand(-1, -1, -1, seq_len), 1, 3).contiguous()
+
+        time_diffs = F.relu(timestamps.unsqueeze(2) - state_times.unsqueeze(1))
+        time_diffs = time_diffs.unsqueeze(2).expand(-1, -1, num_marks, -1)
+        if from_right:
+            valid_terms = time_diffs >= 0
+        else:
+            valid_terms = time_diffs > 0
+
+        prod = alpha # * (-1 * delta * time_diffs).exp()
+        prod = torch.where(valid_terms, prod, torch.zeros_like(prod))
+
+        all_mark_intensities = torch.exp(mu*timestamps.unsqueeze(-1) - prod.sum(-1))
+
+        if isinstance(mark_mask, torch.FloatTensor):
+            if len(mark_mask.shape) == 1:
+                mark_mask = mark_mask.view(*((1,)*(len(all_mark_intensities.shape)-1)), -1)
+            all_mark_intensities *= mark_mask
+
+        all_log_mark_intensities = all_mark_intensities.log()
+        total_intensity = all_mark_intensities.sum(-1)
+
+        intensity_dict = {
+            "all_log_mark_intensities": all_log_mark_intensities,
+            "total_intensity": total_intensity,
+            "all_mark_intensities": all_mark_intensities,
+        }
+
+        if censoring is not None:
+            masks = censoring.get_mask(timestamps)
+
+            intensity_dict["censored_int"] = intensity_dict["all_mark_intensities"] * masks["censored_mask"]
+            intensity_dict["observed_int"] = intensity_dict["all_mark_intensities"] * masks["observed_mask"]
+
+            if censoring.overwrite_with_censored:
+                intensity_dict["all_mark_intensities"] = intensity_dict["censored_int"]
+                intensity_dict["all_log_mark_intensities"] = torch.log(intensity_dict["censored_int"] + 1e-12)
+                intensity_dict["total_intensity"] = intensity_dict["censored_int"].sum(dim=-1)
+            elif censoring.overwrite_with_observed:
+                intensity_dict["all_mark_intensities"] = intensity_dict["observed_int"]
+                intensity_dict["all_log_mark_intensities"] = torch.log(intensity_dict["observed_int"] + 1e-12)
+                intensity_dict["total_intensity"] = intensity_dict["observed_int"].sum(dim=-1)
+
+        if marks is not None:
+            intensity_dict["log_mark_intensity"] = intensity_dict["all_log_mark_intensities"].gather(dim=-1, index=marks.unsqueeze(-1)).squeeze(-1)
+        
+        return intensity_dict 

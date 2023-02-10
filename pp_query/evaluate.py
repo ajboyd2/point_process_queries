@@ -620,22 +620,42 @@ def _censored_log_likelihood(args, model, dataloader, censor_mark_pct, num_seqs,
 
         original_times, original_marks, T = batch["tgt_times"], batch["tgt_marks"], batch["T"].item()
 
-        unique_marks = torch.unique(original_marks.squeeze(0))
-        num_unique = unique_marks.numel()
-        if num_unique <= 1:
-            continue
-        num_to_keep = max(math.floor(num_unique*censor_mark_pct), 1)
-        results["unique_marks"].append(num_unique)
-        results["kept_marks"].append(num_to_keep)
+        if args.censor_all_marks:
+            num_events = original_times.numel()
+            num_events_to_censor = math.ceil(num_events*censor_mark_pct)
+            if (num_events <= 2) or (num_events_to_censor == 0):
+                continue
+            prefix_num = max((num_events - num_events_to_censor) // 2, 1)
+            results["unique_marks"].append(num_events)  # TODO: Change keys to reflect that these aren't marks but rather the number of events kept
+            results["kept_marks"].append(prefix_num*2)
 
-        marks_to_censor = sorted(unique_marks[torch.randperm(num_unique)[:num_to_keep]].tolist())
-        censoring = CensoredTimeline(
-            boundaries=(0.0, T), 
-            censored_marks=marks_to_censor, 
-            total_marks=M, 
-            relative_start=False, 
-            device=args.device,
-        )
+            censoring = CensoredTimeline(
+                boundaries=(
+                    original_times[..., prefix_num-1].item()+1e-8, 
+                    original_times[..., -prefix_num-1].item()+1e-8,
+                ),
+                censored_marks=list(range(M)),
+                total_marks=M,
+                relative_start=False,
+                device=args.device,
+            )
+        else:
+            unique_marks = torch.unique(original_marks.squeeze(0))
+            num_unique = unique_marks.numel()
+            if num_unique <= 1:
+                continue
+            num_to_keep = max(math.floor(num_unique*censor_mark_pct), 1)
+            results["unique_marks"].append(num_unique)
+            results["kept_marks"].append(num_to_keep)
+
+            marks_to_censor = sorted(unique_marks[torch.randperm(num_unique)[:num_to_keep]].tolist())
+            censoring = CensoredTimeline(
+                boundaries=(0.0, T), 
+                censored_marks=marks_to_censor, 
+                total_marks=M, 
+                relative_start=False, 
+                device=args.device,
+            )
 
         censored_model = CensoredPP(
             base_process=model, 
@@ -709,22 +729,44 @@ def _censored_next_event(args, model, dataloader, censor_mark_pct, num_seqs, num
 
         original_times, original_marks, T = batch["tgt_times"], batch["tgt_marks"], batch["T"].item()
 
-        unique_marks = torch.unique(original_marks.squeeze(0))
-        num_unique = unique_marks.numel()
-        if num_unique <= 1:
-            continue
-        num_to_keep = max(math.floor(num_unique*censor_mark_pct), 1)
-        results["unique_marks"].append(num_unique)
-        results["kept_marks"].append(num_to_keep)
 
-        marks_to_censor = sorted(unique_marks[torch.randperm(num_unique)[:num_to_keep]].tolist())
-        censoring = CensoredTimeline(
-            boundaries=(0.0, T), 
-            censored_marks=marks_to_censor, 
-            total_marks=M, 
-            relative_start=False, 
-            device=args.device,
-        )
+        if args.censor_all_marks:
+            num_events = original_times.numel()
+            num_events_to_censor = math.ceil(num_events*censor_mark_pct)
+            if (num_events <= 2) or (num_events_to_censor == 0):
+                continue
+            prefix_num = max((num_events - num_events_to_censor) // 2, 1)
+            results["unique_marks"].append(num_events)  # TODO: Change keys to reflect that these aren't marks but rather the number of events kept
+            results["kept_marks"].append(prefix_num*2)
+
+            censoring = CensoredTimeline(
+                boundaries=(
+                    original_times[..., prefix_num-1].item()+1e-8, 
+                    original_times[..., -prefix_num-1].item()+1e-8,
+                ),
+                censored_marks=list(range(M)),
+                total_marks=M,
+                relative_start=False,
+                device=args.device,
+            )
+        else:
+            unique_marks = torch.unique(original_marks.squeeze(0))
+            num_unique = unique_marks.numel()
+            if num_unique <= 1:
+                continue
+            num_to_keep = max(math.floor(num_unique*censor_mark_pct), 1)
+            results["unique_marks"].append(num_unique)
+            results["kept_marks"].append(num_to_keep)
+
+            marks_to_censor = sorted(unique_marks[torch.randperm(num_unique)[:num_to_keep]].tolist())
+            censoring = CensoredTimeline(
+                boundaries=(0.0, T), 
+                censored_marks=marks_to_censor, 
+                total_marks=M, 
+                relative_start=False, 
+                device=args.device,
+            )
+
 
         censored_model = CensoredPP(
             base_process=model, 
@@ -741,12 +783,16 @@ def _censored_next_event(args, model, dataloader, censor_mark_pct, num_seqs, num
                 uncensored_marks=original_marks, 
                 T=T,
                 num_sampled_sequences=1024,
+                censor_all_marks=args.censor_all_marks,
+                prefix_num=prefix_num if args.censor_all_marks else None,
             )
         else:
             single_result = censored_model.future_pred_experiment_pass(
                 uncensored_times=original_times, 
                 uncensored_marks=original_marks, 
                 T=T,
+                censor_all_marks=args.censor_all_marks,
+                prefix_num=prefix_num if args.censor_all_marks else None,
             )
         if single_result is not None:
             for k,v in single_result.items():
@@ -769,6 +815,7 @@ def sample_sequences(args, model):
         censoring=None,
         num_samples=args.num_queries,
         proposal_batch_size=args.proposal_batch_size,
+        verbose=True,
     )
     print_log("Saving {} Sequences".format(args.num_queries))
     for t, m in zip(sampled_times, sampled_marks):

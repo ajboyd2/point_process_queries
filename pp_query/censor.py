@@ -354,28 +354,39 @@ class CensoredPP:
         return results
 
     @torch.no_grad()
-    def future_pred_experiment_pass(self, uncensored_times, uncensored_marks, T):
+    def future_pred_experiment_pass(self, uncensored_times, uncensored_marks, T, censor_all_marks=False, prefix_num=None):
         n = uncensored_times.shape[-1]
-        hist_times, target_time = uncensored_times[..., :n//2], uncensored_times[..., n//2].squeeze()
-        hist_marks, target_mark = uncensored_marks[..., :n//2], uncensored_marks[..., n//2].squeeze()
-        cond_end_time = hist_times.max()
-        new_boundaries = [(a, min(b, cond_end_time.item()-1e-8)) for (a,b) in self.censoring.boundaries if a < cond_end_time]  # We want the censoring to end just before the last event being conditioned on
-        censoring = CensoredTimeline(
-            boundaries=new_boundaries,
-            censored_marks=self.censoring.censored_marks[:len(new_boundaries)], 
-            total_marks=self.censoring.total_marks, 
-            relative_start=False, 
-            device=self.device,
-        )
-        obs_hist_times, obs_hist_marks = censoring.filter_sequences(times=hist_times, marks=hist_marks)
-        if obs_hist_times.numel() == 0:
-            sampling_time_start = cond_end_time * 0.0
+        if censor_all_marks:
+            assert(prefix_num is not None)
+            hist_times, target_time = uncensored_times[..., :prefix_num], uncensored_times[..., -prefix_num]
+            hist_marks, target_mark = uncensored_marks[..., :prefix_num], uncensored_marks[..., -prefix_num]
+            last_time = uncensored_times[..., -prefix_num-1].item()
+            cond_end_time = uncensored_times[..., -prefix_num-1].squeeze() + 1e-8
+            censoring = self.censoring
+            obs_hist_times, obs_hist_marks = censoring.filter_sequences(times=hist_times, marks=hist_marks)
         else:
-            sampling_time_start = obs_hist_times.max()
+            hist_times, target_time = uncensored_times[..., :n//2], uncensored_times[..., n//2].squeeze()
+            hist_marks, target_mark = uncensored_marks[..., :n//2], uncensored_marks[..., n//2].squeeze()
+            cond_end_time = hist_times.max()
+            new_boundaries = [(a, min(b, cond_end_time.item()-1e-8)) for (a,b) in self.censoring.boundaries if a < cond_end_time]  # We want the censoring to end just before the last event being conditioned on
+            censoring = CensoredTimeline(
+                boundaries=new_boundaries,
+                censored_marks=self.censoring.censored_marks[:len(new_boundaries)], 
+                total_marks=self.censoring.total_marks, 
+                relative_start=False, 
+                device=self.device,
+            )
+            obs_hist_times, obs_hist_marks = censoring.filter_sequences(times=hist_times, marks=hist_marks)
+            if obs_hist_times.numel() == 0:
+                sampling_time_start = cond_end_time * 0.0
+            else:
+                sampling_time_start = obs_hist_times.max()
+            last_time = sampling_time_start
+
         results = {
             "true_time": target_time.squeeze(),
             "true_mark": target_mark.squeeze(),
-            "last_time": sampling_time_start,
+            "last_time": last_time,
         }
 
         fine_grid_pts = torch.linspace(1e-8, 0.01, self.num_integral_pts, device=self.device)
